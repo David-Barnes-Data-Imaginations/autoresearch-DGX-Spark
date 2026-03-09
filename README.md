@@ -83,6 +83,46 @@ I think these would be the reasonable hyperparameters to play with. Ask your fav
 - [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
 - [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
 - [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
+- [David-Barnes-Data-Imaginations/autoresearch-DGX-Spark](https://github.com/David-Barnes-Data-Imaginations/autoresearch-DGX-Spark) (NVIDIA DGX Spark)
+
+## DGX Spark Support
+
+This repository includes official support for the **NVIDIA DGX Spark** workstation with GB10 Grace Blackwell Superchip.
+
+### Key Features
+
+- **Docker-based execution** with unified memory architecture optimizations
+- **Pinned memory** for 50× faster H2D transfers
+- **OOM protection** to prevent system-wide freezes
+- **ARM64 compatibility** with PyTorch's scaled_dot_product_attention
+- **Optimized hyperparameters** for DGX Spark memory constraints
+
+### Quick Start
+
+```bash
+# Launch Docker container with DGX optimizations
+./run-dgx.sh
+
+# Inside container
+uv sync
+uv run prepare.py --num-shards 5
+uv run train.py
+```
+
+### Documentation
+
+- [`DGX_QUICKSTART.md`](DGX_QUICKSTART.md) - Quick start guide
+- [`DGX_SETUP.md`](DGX_SETUP.md) - Comprehensive setup documentation
+- [`DGX_TROUBLESHOOTING.md`](DGX_TROUBLESHOOTING.md) - Troubleshooting guide
+- [`DGX_ADAPTATION_SUMMARY.md`](DGX_ADAPTATION_SUMMARY.md) - Technical details
+
+### Configuration
+
+Optimized for DGX Spark's 128GB unified memory:
+- **DEPTH**: 4 (reduced from 8)
+- **DEVICE_BATCH_SIZE**: 8 (reduced from 128)
+- **TOTAL_BATCH_SIZE**: 2^16 (65K tokens)
+- **Throughput**: ~117,000 tokens/sec
 
 ## License
 
