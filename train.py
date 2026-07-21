@@ -573,9 +573,9 @@ WARMUP_RATIO = 0.0  # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.5  # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0  # final LR as fraction of initial
 
-# Model size (scaled up to utilize GB10 unified memory)
-DEPTH = 8  # number of transformer layers
-DEVICE_BATCH_SIZE = 16  # per-device batch size
+# Model size (eager mode, no compile overhead on GB10)
+DEPTH = 4  # number of transformer layers
+DEVICE_BATCH_SIZE = 8  # per-device batch size
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -638,11 +638,8 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-# DGX Spark: Disable torch.compile max_autotune (not enough SMs for GB10)
-torch._inductor.config.max_autotune = False
-torch._inductor.config.coordinate_descent_tuning = False
-
-model = torch.compile(model, dynamic=False)
+# DGX Spark: Skip torch.compile — eager mode is faster on GB10 (few SMs)
+# model = torch.compile(model, dynamic=False)
 
 # DGX Spark: Use pinned memory for faster H2D transfers
 train_loader = make_dataloader(
