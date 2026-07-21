@@ -10,7 +10,10 @@ dependencies = [
     "numpy>=2.2.6",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
-    "requests>=2.32.0",
+    "requests>=2.32.4",
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
 ]
+
+[tool.uv]
+package = false
