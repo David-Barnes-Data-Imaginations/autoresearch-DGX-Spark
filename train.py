@@ -638,8 +638,7 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-# DGX Spark: Skip torch.compile — eager mode is faster on GB10 (few SMs)
-# model = torch.compile(model, dynamic=False)
+model = torch.compile(model, dynamic=False)
 
 # DGX Spark: Use pinned memory for faster H2D transfers
 train_loader = make_dataloader(
