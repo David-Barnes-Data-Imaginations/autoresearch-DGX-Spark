@@ -573,9 +573,9 @@ WARMUP_RATIO = 0.0  # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.5  # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0  # final LR as fraction of initial
 
-# Model size (optimized for DGX Spark unified memory)
-DEPTH = 4  # number of transformer layers (reduced from 8 for stability)
-DEVICE_BATCH_SIZE = 8  # per-device batch size (reduced from 128 for DGX Spark)
+# Model size (scaled up to utilize GB10 unified memory)
+DEPTH = 12  # number of transformer layers
+DEVICE_BATCH_SIZE = 32  # per-device batch size
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
