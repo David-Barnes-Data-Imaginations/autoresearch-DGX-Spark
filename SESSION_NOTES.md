@@ -48,6 +48,39 @@
 | 3 | DEPTH=6, AR=48, MR=0.04 | 1.881 | 72 | 106K | 26.3M | ✗ |
 | 4 | LLLL windows, WD=0.05, B1=0.9, WD=0.05 | 1.878 | 113 | 177K | 11.5M | ✗ |
 
+### Session Jul22-P4 (2026-07-22, ~17:00-21:30 UTC) - Fourth autonomous session
+
+### Experiments Run:
+
+| # | Config Change | val_bpb | Steps | tok/s | Verdict |
+|---|--------------|---------|-------|-------|---------|
+| 3 | TOTAL_BATCH_SIZE=2^18 | 1.877 | 214 | 177K | ✗ worse |
+| 4 | WARMDOWN_RATIO=0.0 | 1.882 | 111 | 174K | ✗ worse |
+| 5 | Muon momentum 0.90→1.00 | 1.873 | 114 | 179K | ✗ worse |
+| 6 | EMBEDDING_LR=0.3 | 1.874 | 113 | 178K | ✗ worse |
+| 7 | SCALAR_LR=1.0 | 1.869 | 114 | 178K | ~ closest but still ✗ |
+
+### Key Findings from Session P4:
+1. **None of 5 experiments beat baseline 1.865** — the baseline config is remarkably hard to improve upon.
+2. **Exp 7 (SCALAR_LR=1.0) was closest at 1.869** — only +0.004 above baseline. Worth investigating scalar LR tuning further.
+3. **Throughput is stable at ~177-179K tok/s** — the GB10 is consistently delivering. ~3s/step is the physical limit for this config.
+4. **Wider/deeper models fail due to fewer steps** — confirmed again. 114 steps is the sweet spot for 300s budget.
+5. **Learning rate changes all moved in wrong direction** — the current LR configuration is already well-tuned.
+
+### Updated Hypotheses (ranked by priority):
+1. **SCALAR_LR sweep: 0.8, 1.2, 1.5** — Exp 7 was closest, need finer tuning
+2. **MATRIX_LR=0.05 or 0.06** — slightly higher Muon LR (previous 0.08 was too much)
+3. **WEIGHT_DECAY=0.05** — less aggressive decay (previous 0.05+combo didn't help alone)
+4. **HEAD_DIM=64** — narrower attention heads for more compute per token
+5. **WARMUP_RATIO=0.05** — small warmup for stability
+6. **Remove Value Embeddings** — major arch change, requires careful multi-edit patch
+7. **Simpler MLP** — ReLU instead of ReLU²
+8. **Adam betas=(0.85, 0.95)** — midpoint between 0.8 and 0.9
+9. **Gradient clipping (max_norm=1.0)** — stabilize gradient magnitudes
+10. **TIME_BUDGET increase** — can we train longer for better val_bpb?
+
+### Current Best: val_bpb=1.865391 (unchanged from baseline DEPTH=4, AR=64)
+
 ### Critical Insight:
 The 5-minute time budget + ~3s/step = ~100 steps. **Maximizing tokens/step** is more important than model capacity improvements. The baseline already achieves ~180K tok/s which is excellent for GB10.
 
