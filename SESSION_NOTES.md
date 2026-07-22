@@ -1,6 +1,32 @@
 # Autoresearch Sessions (DGX Spark)
 
-## Session Jul22-P2 (2026-07-22, 11:00-13:00 UTC) - Second autonomous session
+## Session Jul22-P3 (2026-07-22, 14:00-17:00 UTC) - Third autonomous session
+
+### Infrastructure Fixed:
+- **CRITICAL:** Previous sessions didn't sync code changes to spark properly. Local edits stayed local; spark ran stale baseline code.
+- **Fix:** scp train.py + prepare.py to spark before each run. Created clean runner script `/tmp/run_spark_exp.sh` on spark (avoids run_experiment.sh quoting issues via ssh).
+- **Container note:** Runs as root → HOME=/home/david-barnes must be set as env var.
+
+### Experiment 3: TOTAL_BATCH_SIZE=2^18 (halved from 2^19)
+- **Hypothesis:** Smaller batches = more optimizer steps = better convergence
+- **Result:** val_bpb=1.876521, 214 steps, ~1480ms/step
+- **Baseline comparison:** 1.865 (114 steps, ~3s/step)
+- **Verdict:** ✗ WORSE by +0.011 despite 2x more steps
+- **Insight:** Larger batches (2^19) provide better convergence dynamics. Per-token training quality > optimizer step count.
+
+### Updated Hypotheses (ranked by priority):
+1. **TOTAL_BATCH_SIZE=2^20** — if larger=better, go even bigger
+2. **WARMDOWN_RATIO=0.0** — eliminate warmdown, maximize full-LR time
+3. **EMBEDDING_LR=0.3 or 0.2** — 0.6 may be too aggressive
+4. **Adam betas=(0.9, 0.95)** — more first-moment momentum
+5. **Remove Value Embeddings** — reduce arch complexity for throughput
+6. **Simpler MLP** — ReLU instead of ReLU²
+7. **SCALAR_LR=1.0** — per-layer scalars need more training
+8. **Muon momentum=0.97** — higher momentum for matrix params
+9. **HEAD_DIM=64** — narrower attention heads
+10. **Gradient clipping (max_norm=1.0)** — stabilize training
+
+### Current Best: val_bpb=1.865391 (unchanged from baseline)
 
 ### Current Best: val_bpb=1.865391 (DEPTH=4, AR=64, 11.5M params, MATRIX_LR=0.04, baseline config)
 
