@@ -558,7 +558,7 @@ class MuonAdamW(torch.optim.Optimizer):
 
 # Model architecture
 ASPECT_RATIO = 64  # model_dim = depth * ASPECT_RATIO (11.5M params)
-HEAD_DIM = 128  # target head dimension for attention
+HEAD_DIM = 64  # target head dimension for attention
 WINDOW_PATTERN = "SSSL"  # sliding window pattern: L=full, S=half context
 
 # Optimization
@@ -710,6 +710,7 @@ while True:
         if group["kind"] == "muon":
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     model.zero_grad(set_to_none=True)
 

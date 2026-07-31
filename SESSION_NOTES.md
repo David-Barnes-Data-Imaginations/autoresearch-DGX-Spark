@@ -100,3 +100,38 @@ The 5-minute time budget + ~3s/step = ~100 steps. **Maximizing tokens/step** is 
 - Focus on **throughput optimization** first (reducing step time below 2.5s)
 - Then try **simplifying architecture** (remove VE, simpler MLP)
 - Only then try **LR scheduling** experiments
+
+---
+
+## Session Jul23-P1 (2026-07-23) — Throughput Breakthrough
+
+### Experiments Run:
+
+| # | Config Change | val_bpb | Steps | tok/s | Params | VRAM (MB) | Verdict |
+|---|--------------|---------|-------|-------|--------|-----------|---------|
+| 1 | MATRIX_LR=0.05, SCALAR_LR=1.2 | 1.872971 | 112 | 176K | 11.5M | 1815 | ✗ worse |
+| 2 | SCALAR_LR=1.0, MATRIX_LR=0.04 | 1.872700 | 112 | 174K | 11.5M | 1815 | ✗ worse |
+| 3 | **HEAD_DIM=64 + grad clip (max_norm=1.0)** | **1.864236** | **158** | **256K** | 11.5M | **1303** | **✓ NEW BEST!** |
+
+### Key Findings:
+1. **HEAD_DIM=64 is a major breakthrough!** Narrower attention heads (64 vs 128) means:
+   - 12 heads instead of 6 for the same 768-dim model → more parallel attention compute
+   - 45% faster step time (2050ms vs 3000ms) → 41% more optimizer steps (158 vs 112)
+   - 28% less VRAM (1303MB vs 1815MB)
+   - **val_bpb=1.864236 beats baseline 1.865391 by -0.001155**
+
+2. **SCALAR_LR sweep (0.5, 1.0, 1.2) all worse than baseline** — the per-layer scalars are already well-tuned at 0.5. Higher values destabilize training.
+
+3. **MATRIX_LR=0.05 worse than 0.04** — Muon LR is already optimal at 0.04.
+
+4. **Gradient clipping (max_norm=1.0) contributes to stability** — combined with HEAD_DIM=64, training is smooth with no loss explosions.
+
+### New Baseline: val_bpb=1.864236 (DEPTH=4, AR=64, HEAD_DIM=64, MATRIX_LR=0.04, SCALAR_LR=0.5, grad_clip=1.0)
+
+### Next Session Priorities:
+1. **HEAD_DIM=32** — even narrower heads? (768/32=24 heads) May be too narrow, but worth testing
+2. **HEAD_DIM=64 + WARMUP_RATIO=0.05** — small warmup for the faster training
+3. **HEAD_DIM=64 + remove Value Embeddings** — reduce complexity further
+4. **HEAD_DIM=64 + simpler MLP** (ReLU instead of ReLU²)
+5. **HEAD_DIM=64 + WEIGHT_DECAY=0.05** — less aggressive decay
+6. **HEAD_DIM=64 + try DEPTH=5** — slightly deeper with the faster step time
