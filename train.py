@@ -587,7 +587,8 @@ torch.cuda.manual_seed(42)
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-H100_BF16_PEAK_FLOPS = 989.5e12
+# GB10 (RTX 5070-class) peak BF16 FLOPS: ~40 TFLOPS
+GB10_BF16_PEAK_FLOPS = 40e12
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
@@ -710,7 +711,7 @@ while True:
         if group["kind"] == "muon":
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.3)
     optimizer.step()
     model.zero_grad(set_to_none=True)
 
@@ -734,7 +735,7 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta ** (step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / GB10_BF16_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(
@@ -775,7 +776,7 @@ steady_state_mfu = (
     * TOTAL_BATCH_SIZE
     * (step - 10)
     / total_training_time
-    / H100_BF16_PEAK_FLOPS
+    / GB10_BF16_PEAK_FLOPS
     if total_training_time > 0
     else 0
 )
