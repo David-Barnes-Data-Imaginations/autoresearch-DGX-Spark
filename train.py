@@ -711,7 +711,7 @@ while True:
         if group["kind"] == "muon":
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.3)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
     optimizer.step()
     model.zero_grad(set_to_none=True)
 
