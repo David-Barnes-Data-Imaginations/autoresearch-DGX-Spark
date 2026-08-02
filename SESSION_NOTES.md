@@ -40,6 +40,9 @@ Today's session focused on establishing a stable baseline and running a gradient
 | 16 | EMBEDDING_LR=0.65 | 1.863348 | 158 | 251K | 30.3% | ✓ best so far |
 | 17 | EMBEDDING_LR=0.75 | 1.863481 | 158 | 251K | 30.4% | ✗ worse |
 | 18 | EMBEDDING_LR=0.65 + SCALAR_LR=0.55 | 1.863295 | 158 | 251K | 30.3% | ✓ **NEW BEST** |
+| 19 | SCALAR_LR=0.525 (fine-tune from 0.55) | 1.863265 | 158 | 255K | 30.4% | ✓ improvement |
+| 20 | GRAD_CLIP=0.25 (tighter than 0.3) | 1.863214 | 158 | 255K | 30.2% | ✓ **NEW BEST** |
+| 21 | EMBEDDING_LR=0.625 (lower from 0.65) | 1.863223 | 157 | 254K | 30.3% | ✗ worse |
 
 ### Key Findings (Aug 02)
 
@@ -57,10 +60,10 @@ ASPECT_RATIO = 64
 HEAD_DIM = 64
 WINDOW_PATTERN = "SSSL"
 TOTAL_BATCH_SIZE = 2**19
-EMBEDDING_LR = 0.65  # was 0.6
+EMBEDDING_LR = 0.65  # best so far
 UNEMBEDDING_LR = 0.004
 MATRIX_LR = 0.04
-SCALAR_LR = 0.55  # was 0.5
+SCALAR_LR = 0.525  # tuned down from 0.55 — best so far
 WEIGHT_DECAY = 0.1
 ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.0
@@ -68,11 +71,27 @@ WARMDOWN_RATIO = 0.1
 FINAL_LR_FRAC = 0.0
 DEPTH = 4
 DEVICE_BATCH_SIZE = 8
-GRAD_CLIP = 0.3
+GRAD_CLIP = 0.25  # tuned down from 0.3 — best so far
 ```
 
 ### Next Steps
-- Try EMBEDDING_LR=0.65 with SCALAR_LR=0.525 (fine-tune)
 - Try WARMUP_RATIO=0.01 (very tiny warmup)
-- Try GRAD_CLIP=0.25
+- Try MATRIX_LR=0.038 (slightly lower)
+- Try SCALAR_LR=0.50 (further fine-tune)
 - Consider Phase 2: HRM/RDT architecture experimentation
+
+## Session Date: 2026-08-02 (Session 3)
+
+### Summary
+Ran 3 new experiments building on the Aug 02 best config. Found two new improvements:
+1. **SCALAR_LR=0.525** (down from 0.55) → val_bpb=1.863265 (improvement)
+2. **GRAD_CLIP=0.25** (down from 0.3) → val_bpb=1.863214 (new best)
+
+Combined best config: `EMBEDDING_LR=0.65, SCALAR_LR=0.525, GRAD_CLIP=0.25`
+This beats the previous best of 1.863295 by 0.000081 (0.004% improvement).
+
+### Key Observations
+- Both scalar LR reduction and tighter gradient clipping improved results
+- EMBEDDING_LR=0.625 was slightly worse than 0.65, confirming 0.65 is optimal
+- All runs maintained ~158 steps and ~255K tok/s throughput
+- MFU consistently ~30% on GB10 (correct baseline, not H100)
