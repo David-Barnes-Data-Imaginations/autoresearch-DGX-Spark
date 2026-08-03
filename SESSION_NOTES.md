@@ -160,13 +160,14 @@ Ran 3 additional experiments completing the softcap sweep and testing SCALAR_LR=
 |---|--------------|---------|-------|-------|-----|---------|
 | 27 | softcap=8 (down from 10) | 1.862548 | 157 | 254K | 30.2% | ✗ worse (0.000026 worse) |
 | 28 | softcap=12 (up from 10) | 1.862824 | 157 | 254K | 30.1% | ✗ worse (0.000302 worse) |
-| 29 | SCALAR_LR=0.50 (down from 0.525) | 1.862600 | 157 | 253K | 30.1% | ✗ worse (0.000078 worse) |
+| 29 | SCALAR_LR=0.50 (down from 0.525) | 1.862627 | 157 | 255K | 30.1% | ✗ worse (0.000105 worse) |
 
 ### Key Findings (Aug 03, Session 5)
 1. **softcap=10 is confirmed optimal** — both tighter (8) and looser (12) clamping hurt. The sweep is now complete.
 2. **SCALAR_LR=0.525 is confirmed optimal** — going lower to 0.50 was worse. The scalar LR sweet spot is narrow.
 3. All experiments maintained 157 steps and ~254K tok/s throughput, confirming config stability.
 4. MFU consistently ~30% on GB10 (correct baseline).
+5. **Bug found and fixed**: The SCALAR_LR sed pattern in run_inline_patch.sh didn't match the full comment in train.py (`# learning rate for per-layer scalars (Adam) — best so far` vs `# best so far`). The first SCALAR_LR=0.50 run was actually with 0.525. Fixed the sed pattern to match the full comment, and re-ran with correct results (val_bpb=1.862627).
 
 ### Current Best Config (Final)
 ```python
