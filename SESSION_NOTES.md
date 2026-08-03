@@ -95,3 +95,56 @@ This beats the previous best of 1.863295 by 0.000081 (0.004% improvement).
 - EMBEDDING_LR=0.625 was slightly worse than 0.65, confirming 0.65 is optimal
 - All runs maintained ~158 steps and ~255K tok/s throughput
 - MFU consistently ~30% on GB10 (correct baseline, not H100)
+
+## Session Date: 2026-08-03
+
+### Summary
+Ran 4 experiments focusing on the softcap parameter and fine-tuning hyperparameters.
+The softcap=10 change was the clear winner, giving a significant improvement.
+
+### Experiments Run
+
+| # | Config Change | val_bpb | Steps | tok/s | MFU | Verdict |
+|---|--------------|---------|-------|-------|-----|---------|
+| 22 | softcap=10 (down from 15) | **1.862522** | 157 | 255K | 30.3% | ✓ **NEW BEST** |
+| 23 | MATRIX_LR=0.038 (down from 0.04) | 1.880409 | 73* | 148K* | 13.0% | ✗ worse |
+| 24 | WARMUP_RATIO=0.01 | 1.863827 | 158 | 255K | 30.4% | ✗ worse |
+| 25 | WEIGHT_DECAY=0.05 (down from 0.1) | 1.862630 | 157 | 253K | 30.2% | ✗ worse |
+| 26 | UNEMBEDDING_LR=0.005 (up from 0.004) | 1.862750 | 157 | 255K | 30.3% | ✗ worse |
+
+*Experiment 23 had fewer steps (73 vs 157) due to torch.compile recompilation overhead for the new code variant. Results are not directly comparable.
+
+### Key Findings (Aug 03)
+
+1. **softcap=10 is a major improvement** — reduced from 15 to 10, val_bpb improved from 1.863214 to 1.862522 (0.000692 improvement, ~0.04%). This is the biggest single improvement since the initial baseline.
+2. **MATRIX_LR=0.038 didn't help** — lower LR with fewer steps (due to recompilation) was worse. Need to re-test with cached compilation.
+3. **Tiny warmup (0.01) didn't help** — 0.01 warmup (6s out of 300s) was slightly worse than no warmup. Confirms no warmup is optimal for 5-min budget.
+4. **Lower weight decay (0.05) didn't help** — very close to baseline but slightly worse.
+5. **Higher unembedding LR (0.005) didn't help** — slightly worse than 0.004.
+
+### Current Best Config (Aug 03)
+```python
+ASPECT_RATIO = 64
+HEAD_DIM = 64
+WINDOW_PATTERN = "SSSL"
+TOTAL_BATCH_SIZE = 2**19
+EMBEDDING_LR = 0.65  # best so far
+UNEMBEDDING_LR = 0.004
+MATRIX_LR = 0.04
+SCALAR_LR = 0.525  # best so far
+WEIGHT_DECAY = 0.1
+ADAM_BETAS = (0.8, 0.95)
+WARMUP_RATIO = 0.0
+WARMDOWN_RATIO = 0.1
+FINAL_LR_FRAC = 0.0
+DEPTH = 4
+DEVICE_BATCH_SIZE = 8
+GRAD_CLIP = 0.25  # best so far
+softcap = 10  # NEW — down from 15, major improvement
+```
+
+### Next Steps
+- Try softcap=8 (even tighter clamping)
+- Try softcap=12 (middle ground)
+- Consider Phase 2: HRM/RDT architecture experimentation
+- Re-test MATRIX_LR=0.038 with cached compilation for fair comparison
