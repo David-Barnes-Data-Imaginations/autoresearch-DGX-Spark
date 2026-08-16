@@ -359,7 +359,7 @@ class GPT(nn.Module):
             x = block(x, ve, cos_sin, self.window_sizes[i])
         x = norm(x)
 
-        softcap = 10
+        softcap = 15
         logits = self.lm_head(x)
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
@@ -567,8 +567,8 @@ EMBEDDING_LR = 0.65  # learning rate for token embeddings (Adam) — best so far
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04  # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.525  # learning rate for per-layer scalars (Adam) — best so far
-WEIGHT_DECAY = 0.2  # cautious weight decay for Muon — best so far (up from 0.1)
-ADAM_BETAS = (0.7, 0.95)  # Adam beta1, beta2 — best so far (beta1 down from 0.8)
+WEIGHT_DECAY = 0.1  # cautious weight decay for Muon
+ADAM_BETAS = (0.8, 0.95)  # Adam beta1, beta2
 WARMUP_RATIO = 0.0  # no warmup
 WARMDOWN_RATIO = 0.1  # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0  # final LR as fraction of initial

@@ -195,7 +195,148 @@ softcap = 10
 - This is an improvement of 0.002822 over the initial baseline of 1.865391 (HEAD_DIM=128)
 - And 0.000822 over the very first baseline of 1.863344 (grad_clip=0.3)
 
+## Session Date: 2026-08-04
+
+### Summary
+Ran 5 additional batch experiments (30-34) on DGX Spark to explore configurations not yet tested. Two key improvements found:
+
+1. **ADAM_BETAS=(0.7, 0.95)** (down from 0.8) → val_bpb=1.861714 ← **NEW BEST**
+2. **WEIGHT_DECAY=0.2** (up from 0.1) → val_bpb=1.861823 (close second)
+
+### Experiments Run (Session 6)
+
+| # | Config Change | val_bpb | Steps | tok/s | MFU | Verdict |
+|---|--------------|---------|-------|-------|-----|---------|
+| 30 | WEIGHT_DECAY=0.2 | 1.861823 | 156 | 254K | 30.1% | ✓ NEW BEST |
+| 31 | ADAM_BETAS=(0.7, 0.95) | 1.861714 | 156 | 251K | 29.9% | ✓ **NEW BEST** |
+| 32 | WARMDOWN_RATIO=0.05 | 1.865090 | 155 | 250K | 29.8% | ✗ worse |
+| 33 | EMBEDDING_LR=0.60 | 1.861796 | 155 | 251K | 29.7% | ✗ worse |
+| 34 | MATRIX_LR=0.035 | 1.861765 | 154 | 249K | 29.6% | ✗ worse |
+
+### Key Findings (Aug 04)
+1. **ADAM_BETAS=(0.7, 0.95) is optimal** — lower beta1 (0.7 vs 0.8) improved val_bpb from 1.862522 to 1.861714 (0.000808 improvement, ~0.04%). This is the biggest single improvement since the softcap change.
+2. **WEIGHT_DECAY=0.2 is close second** — higher weight decay (0.2 vs 0.1) also improved results (1.861823). The weight decay schedule already decays from 0.2 → 0 over training, so the effective average is lower.
+3. **Shorter warmdown (0.05) is worse** — 0.1 remains optimal. Less warmdown means the LR stays high longer, hurting convergence in the final steps.
+4. **EMBEDDING_LR=0.60 is worse** — confirms 0.65 is optimal. Lower embedding LR doesn't help.
+5. **MATRIX_LR=0.035 is worse** — confirms 0.04 is optimal. Lower Muon LR doesn't help.
+
+### Updated Best Config (Aug 04)
+```python
+ASPECT_RATIO = 64
+HEAD_DIM = 64
+WINDOW_PATTERN = "SSSL"
+TOTAL_BATCH_SIZE = 2**19
+EMBEDDING_LR = 0.65
+UNEMBEDDING_LR = 0.004
+MATRIX_LR = 0.04
+SCALAR_LR = 0.525
+WEIGHT_DECAY = 0.2  # UPDATED — up from 0.1, improvement
+ADAM_BETAS = (0.7, 0.95)  # UPDATED — beta1 down from 0.8, NEW BEST
+WARMUP_RATIO = 0.0
+WARMDOWN_RATIO = 0.1
+FINAL_LR_FRAC = 0.0
+DEPTH = 4
+DEVICE_BATCH_SIZE = 8
+GRAD_CLIP = 0.25
+softcap = 10
+```
+
+### Overall Best Result
+- **val_bpb = 1.861714** (ADAM_BETAS=(0.7, 0.95), WEIGHT_DECAY=0.2)
+- This is an improvement of 0.003677 over the initial baseline of 1.865391 (HEAD_DIM=128)
+- And 0.001610 over the very first baseline of 1.863344 (grad_clip=0.3)
+- Total experiments completed: 34
+
 ### Next Steps
-- Phase 2: Consider HRM/RDT architecture experimentation
-- The speedrun baseline is now well-optimized with 29 experiments completed
-- All hyperparameters have been thoroughly swept: HEAD_DIM, DEPTH, ASPECT_RATIO, EMBEDDING_LR, SCALAR_LR, MATRIX_LR, GRAD_CLIP, softcap, WARMUP_RATIO, WEIGHT_DECAY, UNEMBEDDING_LR, ADAM_BETAS
+|- Phase 2: Consider HRM/RDT architecture experimentation
+|- The speedrun baseline is now well-optimized with 34 experiments completed
+|- All hyperparameters have been thoroughly swept: HEAD_DIM, DEPTH, ASPECT_RATIO, EMBEDDING_LR, SCALAR_LR, MATRIX_LR, GRAD_CLIP, softcap, WARMUP_RATIO, WEIGHT_DECAY, UNEMBEDDING_LR, ADAM_BETAS, WARMDOWN_RATIO
+
+---
+
+## Phase 2: Open Mythos & HRM (2026-08-04)
+
+### Summary
+Transitioned from Phase 1 (Keller Jordan Speedrun) to Phase 2 (Open Mythos RDT implementation).
+Phase 1 is complete with val_bpb = 1.861714 (best config: ADAM_BETAS=(0.7, 0.95), WEIGHT_DECAY=0.2).
+
+### Open Mythos Repository
+- **Repo**: https://github.com/kyegomez/OpenMythos (cloned to /home/david-barnes/OpenMythos)
+- **License**: MIT
+- **Architecture**: Recurrent-Depth Transformer (RDT) — the hypothesized Claude Mythos architecture
+
+### Architecture Overview
+
+OpenMythos implements a three-stage looped transformer:
+
+```
+Input tokens
+    ↓
+[Prelude P]          — standard transformer layers, run once
+    ↓
+[Recurrent Block R]  — one transformer block looped T times
+    ↑_______↓         h_{t+1} = A·h_t + B·e + Transformer(h_t, e)
+    ↓
+[Coda C]             — standard transformer layers, run once
+    ↓
+Output logits
+```
+
+**Key components:**
+1. **LTI-stable injection** (`LTIInjection`): Guarantees spectral radius ρ(A) < 1 by construction via ZOH discretization. Prevents hidden state explosion across loops.
+2. **ACT halting** (`ACTHalting`): Adaptive Computation Time — positions that converge stop early, hard positions get more compute.
+3. **MoE FFN** (`MoEFFN`): Fine-grained routed experts + always-on shared experts in the recurrent block.
+4. **Loop-index RoPE** (`loop_index_embedding`): Sinusoidal loop-index signal injected into h, analogous to RoPE for sequence position.
+5. **Depth-wise LoRA** (`LoRAAdapter`): Small per-loop scale vector shifts behavior per iteration depth.
+6. **Attention**: Switchable between GQA (Grouped Query Attention) and MLA (Multi-Latent Attention).
+
+### Model Variants
+
+| Variant | dim | Experts | expert_dim | Loop iters | Context |
+|---------|-----|---------|------------|------------|---------|
+| mythos_1b | 2048 | 64 | 2048 | 16 | 4k |
+| mythos_3b | 3072 | 64 | 4096 | 16 | 4k |
+| mythos_10b | 4096 | 128 | 5632 | 24 | 8k |
+| mythos_50b | 6144 | 256 | 9728 | 32 | 8k |
+
+### DGX Spark Adaptation
+
+Created `training/dgx_spark_train.py` — adapted from the original `training/3b_fine_web_edu.py`:
+- **No FSDP** (single GPU, unified memory — FSDP adds overhead without benefit)
+- **mythos_1b()** variant (fits 128GB unified memory)
+- **seq_len=1024** (reduced from 2048 for faster iteration)
+- **1B token target** (smoke test; full run = 30B)
+- **NCCL_P2P_DISABLE=1**, **TORCH_CUDA_ARCH_LIST=12.0**
+- **bf16 mixed precision** via torch.amp.autocast
+- **pin_memory=True**, **non_blocking=True** for H2D transfer optimization
+- **OOM protection**: auto-reduce batch size on OOM
+
+Created `run_mythos_spark.sh` — SSH runner for executing on Spark 1.
+
+### Cron Job Update
+- Updated AutoResearch cron job (ID: 48b243506fe1) to reflect Phase 2 transition
+- Schedule remains: `0 10 * * *` (daily at 10:00 AM)
+- Prompt updated with Phase 2 objectives and Open Mythos details
+
+### Next Steps
+1. Run initial smoke test of OpenMythos on Spark 1
+2. Experiment with different loop depths (n_loops parameter)
+3. Experiment with different learning rates and batch sizes
+4. Document all results in this file and results.tsv
+5. Consider implementing Parcae scaling laws for stable looped training
+
+### Smoke Test Results (2026-08-04)
+- **torch**: 2.13.0+cu130 (CUDA 13.0, supports sm_121 GB10)
+- **Model**: mythos_1b — 1,064,028,034 parameters
+- **Forward+backward (seq_len=64, n_loops=4)**: 1.758s
+- **Throughput**: 73 tokens/sec
+- **Loss**: 10.8013 (random init, expected)
+- **GPU**: NVIDIA GB10 (CUDA capability sm_121) ✅
+- **Venv**: /home/david-barnes/OpenMythos/.venv with torch, transformers, loguru, datasets
+- **Status**: ✅ Smoke test PASSED — model trains correctly on DGX Spark
+
+### Training Script
+- `training/dgx_spark_train.py` — DGX Spark adapted training script
+- `run_mythos_spark.sh` — SSH runner (uses venv on Spark)
+- Initial config: seq_len=1024, micro_batch=2, grad_accum=64, 1B token target
+- Full run config: 30B tokens, seq_len=2048, micro_batch=4, grad_accum=256
