@@ -340,3 +340,52 @@ Created `run_mythos_spark.sh` — SSH runner for executing on Spark 1.
 - `run_mythos_spark.sh` — SSH runner (uses venv on Spark)
 - Initial config: seq_len=1024, micro_batch=2, grad_accum=64, 1B token target
 - Full run config: 30B tokens, seq_len=2048, micro_batch=4, grad_accum=256
+
+---
+
+## Phase 2.5: Nano-Mythos Architecture Validation (Planned)
+
+### Summary
+A minimal (~50M param) RDT-style model to pre-train for ~24 hours, validating the recurrent-depth transformer architecture before committing to full-scale runs.
+
+### Motivation
+Before investing in a full 30B token training run, we need to verify:
+1. The recurrent loop actually improves convergence vs. a standard transformer
+2. ACT halting converges (easy positions stop early)
+3. LTI-stable injection prevents hidden state explosion across loops
+4. Loss curve shape matches theoretical expectations
+
+### Model Config
+| Parameter | Value |
+|-----------|-------|
+| dim | 256 |
+| depth (prelude+coda) | 4 |
+| n_heads | 8 |
+| head_dim | 32 |
+| n_loops (recurrent block) | 8 |
+| seq_len | 512 |
+| micro_batch | 16 |
+| grad_accum | 64 |
+| total_batch | 1024 |
+| tokens | ~1B (The Pile subset) |
+| duration | ~24 hours |
+| params | ~50M |
+
+### Validation Metrics
+- **val_bpb** on held-out data (primary metric)
+- **Average loop iterations used** (ACT efficiency — should be < 8 for easy positions)
+- **Loss vs. step curve** comparison (RDT vs. plain transformer of similar size)
+- **Qualitative text samples** from both models
+
+### Branch
+- `autoresearch/nano-mythos` — dedicated branch for this experiment
+- Will be triggered by tomorrow's daily cron job (10:00 AM)
+- Script: `training/nano_mythos_train.py` (to be created)
+- Runner: `run_nano_mythos_spark.sh` (to be created)
+
+### Next Steps
+1. Create `training/nano_mythos_train.py` — minimal RDT model (~50M params)
+2. Create `run_nano_mythos_spark.sh` — SSH runner for Spark 1
+3. Set up branch `autoresearch/nano-mythos`
+4. Trigger via daily cron job tomorrow
+5. Compare results against a plain transformer baseline of similar size
