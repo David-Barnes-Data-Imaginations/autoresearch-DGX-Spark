@@ -19,6 +19,10 @@ Usage:
     python training/nano_mythos_train.py
 """
 import os
+import sys
+
+# Add parent directory to path so we can import prepare.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -355,7 +359,7 @@ class NanoMythos(nn.Module):
         mask = torch.full((1, 1, seq_len, seq_len), float("-inf"), device=device, dtype=dtype)
         return torch.triu(mask, diagonal=1)
 
-    def forward(self, input_ids: torch.Tensor, n_loops: int = None) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, targets=None, reduction="mean", n_loops: int = None):
         T = input_ids.shape[1]
         device = input_ids.device
 
@@ -372,7 +376,21 @@ class NanoMythos(nn.Module):
         for layer in self.coda:
             x = layer(x, freqs_cis, mask)
 
-        return self.head(self.norm(x))
+        logits = self.head(self.norm(x))
+
+        if targets is not None:
+            # Apply softcap for stable training (matching speedrun baseline)
+            softcap = 10
+            logits = logits.float()
+            logits = softcap * torch.tanh(logits / softcap)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                ignore_index=-1,
+                reduction=reduction,
+            )
+            return loss
+        return logits
 
     def num_params(self) -> int:
         """Count trainable parameters."""
@@ -383,22 +401,6 @@ class NanoMythos(nn.Module):
 # Training Configuration
 # ---------------------------------------------------------------------------
 
-# Model architecture
-NANO_CFG = NanoMythosConfig(
-    vocab_size=8192,
-    dim=256,
-    n_heads=8,
-    n_kv_heads=4,
-    max_seq_len=512,
-    max_loop_iters=8,
-    prelude_layers=2,
-    coda_layers=2,
-    rope_theta=10000.0,
-    act_threshold=0.99,
-    lora_rank=4,
-    dropout=0.0,
-)
-
 # Training hyperparameters
 SEQ_LEN = 512
 MICRO_BATCH = 16
@@ -406,7 +408,7 @@ GRAD_ACCUM = 64
 TOTAL_BATCH_SIZE = MICRO_BATCH * SEQ_LEN * GRAD_ACCUM  # 524,288 tokens per step
 TIME_BUDGET = 86400  # 24 hours
 DEVICE_BATCH_SIZE = MICRO_BATCH
-EVAL_EVERY_N_STEPS = 500
+EVAL_EVERY_N_STEPS = 200
 LOG_EVERY_N_STEPS = 10
 
 # Optimizer
@@ -437,13 +439,14 @@ vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
 
 # Use MAX_SEQ_LEN from prepare.py for evaluation, but our model uses seq_len=512
-# Override the model's max_seq_len to match
+# The model's max_seq_len must be >= MAX_SEQ_LEN (2048) because evaluate_bpb
+# uses MAX_SEQ_LEN for the eval dataloader. Training uses SEQ_LEN=512.
 cfg = NanoMythosConfig(
     vocab_size=vocab_size,
     dim=256,
     n_heads=8,
     n_kv_heads=4,
-    max_seq_len=MAX_SEQ_LEN,  # use the prepare.py MAX_SEQ_LEN for eval compatibility
+    max_seq_len=MAX_SEQ_LEN,  # must cover eval seq_len (2048 from prepare.py)
     max_loop_iters=8,
     prelude_layers=2,
     coda_layers=2,
@@ -456,6 +459,9 @@ cfg = NanoMythosConfig(
 with torch.device("meta"):
     model = NanoMythos(cfg)
 model.to_empty(device=device)
+# Re-initialize the freqs_cis buffer on the correct device (to_empty leaves it uninitialized)
+freqs = precompute_rope_freqs(cfg.dim // cfg.n_heads, cfg.max_seq_len, cfg.rope_theta).to(device=device)
+model.register_buffer("freqs_cis", freqs, persistent=False)
 model._init_weights()
 
 num_params = model.num_params()
@@ -465,10 +471,10 @@ print(f"Config: {asdict(cfg)}")
 
 # Estimate FLOPs per token (rough: 6 * params + attention)
 num_flops_per_token = 6 * num_params  # simplified estimate
-tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
+tokens_per_fwdbwd = DEVICE_BATCH_SIZE * SEQ_LEN
 grad_accum_steps = GRAD_ACCUM
 
-print(f"Seq len: {MAX_SEQ_LEN}")
+print(f"Seq len: {SEQ_LEN}")
 print(f"Micro batch: {DEVICE_BATCH_SIZE}")
 print(f"Grad accum: {grad_accum_steps}")
 print(f"Total batch: {TOTAL_BATCH_SIZE:,} tokens")
@@ -488,7 +494,7 @@ model = torch.compile(model, dynamic=False)
 
 # Dataloader
 train_loader = make_dataloader(
-    tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train", pin_memory=True
+    tokenizer, DEVICE_BATCH_SIZE, SEQ_LEN, "train", pin_memory=True
 )
 x, y, epoch = next(train_loader)
 
@@ -523,8 +529,8 @@ gc.freeze()
 gc.disable()
 
 print(f"\nStarting training loop...")
-print(f"Expected steps: ~{TIME_BUDGET // 100}s / ~100s per step ≈ {TIME_BUDGET // 100} steps")
-print(f"Expected total tokens: ~{TIME_BUDGET * 250000 / 1e9:.1f}B tokens\n")
+print(f"Expected steps: ~{TIME_BUDGET // 20}s / ~20s per step ≈ {TIME_BUDGET // 20} steps")
+print(f"Expected total tokens: ~{TIME_BUDGET * 25000 / 1e9:.1f}B tokens\n")
 
 while True:
     torch.cuda.synchronize()
@@ -533,12 +539,7 @@ while True:
     for micro_step in range(grad_accum_steps):
         try:
             with autocast_ctx:
-                logits = model(x, n_loops=cfg.max_loop_iters)
-                loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
-                    y.view(-1),
-                    ignore_index=-1,
-                )
+                loss = model(x, targets=y, reduction="mean", n_loops=cfg.max_loop_iters)
             train_loss = loss.detach()
             loss = loss / grad_accum_steps
             loss.backward()
