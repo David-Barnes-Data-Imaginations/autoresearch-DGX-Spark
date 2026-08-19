@@ -289,6 +289,7 @@ class RecurrentBlock(nn.Module):
         halted = torch.zeros(B, T, device=h.device, dtype=torch.bool)
         cumulative_p = torch.zeros(B, T, device=h.device)
         h_out = torch.zeros_like(h)
+        loops_used_sum = 0  # track average loop iterations for ACT metrics
 
         for t in range(n_loops):
             h_loop = loop_index_embedding(h, t, self.loop_dim)
@@ -313,9 +314,16 @@ class RecurrentBlock(nn.Module):
             cumulative_p = cumulative_p + p * still_running.float()
             halted = halted | (cumulative_p >= self.cfg.act_threshold)
 
+            # Track how many positions used this loop iteration
+            loops_used_sum += still_running.float().sum().item()
+
             if halted.all():
                 break
 
+        # Return both output and ACT stats (loops_used_sum, total_positions)
+        total_positions = B * T
+        avg_loops = loops_used_sum / max(1, total_positions) if loops_used_sum > 0 else n_loops
+        self.last_avg_loops = avg_loops  # store for logging
         return h_out
 
 
@@ -470,7 +478,11 @@ print(f"Parameters: {num_params:,} ({num_params / 1e6:.1f}M)")
 print(f"Config: {asdict(cfg)}")
 
 # Estimate FLOPs per token (rough: 6 * params + attention)
-num_flops_per_token = 6 * num_params  # simplified estimate
+# For recurrent models, the recurrent block runs n_loops times, so multiply by that factor
+# Only the recurrent block params are counted multiple times
+recurrent_params = sum(p.numel() for p in model.recurrent.parameters() if p.requires_grad)
+non_recurrent_params = num_params - recurrent_params
+num_flops_per_token = 6 * (non_recurrent_params + recurrent_params * cfg.max_loop_iters)
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * SEQ_LEN
 grad_accum_steps = GRAD_ACCUM
 
@@ -519,10 +531,8 @@ t_start_training = time.time()
 smooth_train_loss = 0
 total_training_time = 0
 step = 0
-total_steps = TIME_BUDGET // (MAX_SEQ_LEN * DEVICE_BATCH_SIZE * grad_accum_steps * 0.01)  # rough estimate
-# Better: estimate steps from time budget
-# Each step takes roughly: (MAX_SEQ_LEN * DEVICE_BATCH_SIZE * grad_accum_steps) / throughput
-# We'll just run until time budget expires
+# Run until time budget expires (steps estimated from throughput)
+print(f"\nStarting training loop...")
 
 gc.collect()
 gc.freeze()
@@ -582,10 +592,12 @@ while True:
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
     mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / GB10_BF16_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
+    avg_loops = getattr(model.recurrent, 'last_avg_loops', cfg.max_loop_iters)
 
     print(
         f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lr: {lr:.6f} | "
         f"dt: {dt*1000:.0f}ms | tok/s: {tok_per_sec:,} | mfu: {mfu:.1f}% | "
+        f"avg_loops: {avg_loops:.1f}/{cfg.max_loop_iters} | "
         f"epoch: {epoch} | remaining: {remaining:.0f}s",
         end="",
         flush=True,
@@ -623,6 +635,7 @@ torch.save({
     "step": step,
     "val_bpb": val_bpb,
     "total_tokens": total_tokens,
+    "avg_loops": getattr(model.recurrent, 'last_avg_loops', cfg.max_loop_iters),
 }, checkpoint_path)
 print(f"Checkpoint saved to {checkpoint_path}")
 
@@ -648,3 +661,4 @@ print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"model_dim:        {cfg.dim}")
 print(f"max_loop_iters:   {cfg.max_loop_iters}")
 print(f"act_threshold:    {cfg.act_threshold}")
+print(f"avg_loops:        {getattr(model.recurrent, 'last_avg_loops', cfg.max_loop_iters):.2f}/{cfg.max_loop_iters}")
