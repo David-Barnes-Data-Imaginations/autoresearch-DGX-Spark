@@ -59,6 +59,9 @@ class NanoMythosConfig:
     act_threshold: float = 0.99     # ACT halting threshold
     lora_rank: int = 4              # depth-wise LoRA rank
     dropout: float = 0.0            # no dropout for pretraining
+    # --- RA-06: Parcae LTI Stability (paper Sec 4.1 / 4.2) ---
+    parcae_e_norm: bool = True      # e = LN(P(s)): normalize injected prelude output (loss-spike fix)
+    parcae_depth_sample: bool = True  # per-sequence Poisson depth sampling during training
 
 
 # ---------------------------------------------------------------------------
@@ -231,12 +234,24 @@ class LTIInjection(nn.Module):
     """
     def __init__(self, dim: int):
         super().__init__()
+        # Original init (rho(A) ~= 0.368). apply_parcae_init() can raise it to ~0.95.
         self.log_A = nn.Parameter(torch.zeros(dim))
         self.log_dt = nn.Parameter(torch.zeros(1))
         self.B = nn.Parameter(torch.ones(dim) * 0.1)
 
     def get_A(self) -> torch.Tensor:
         return torch.exp(-torch.exp((self.log_dt + self.log_A).clamp(-20, 20)))
+
+    @torch.no_grad()
+    def spectral_radius(self) -> float:
+        """rho(A) = max_i |A_i| (diagonal A -> max abs of A). Logged each step (RA-06)."""
+        return float(self.get_A().abs().max().item())
+
+    @torch.no_grad()
+    def apply_parcae_init(self):
+        """Set log_A/log_dt so rho(A) ~= 0.95 (Parcae band top). No-op otherwise (ZOH keeps it <1)."""
+        self.log_A.data.fill_(-0.05)
+        self.log_dt.data.fill_(-2.0)
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, transformer_out: torch.Tensor) -> torch.Tensor:
         A = self.get_A()
@@ -282,9 +297,17 @@ class RecurrentBlock(nn.Module):
         self.norm = RMSNorm(cfg.dim)
         self.loop_dim = cfg.dim // 8  # fraction of channels receiving loop-index embedding
 
-    def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
+        """n_loops: int (max loops, used at eval/inference).
+        seq_depths: optional (B,) long tensor of per-sequence depths for this training
+        step (Parcae per-sequence depth sampling). Sequence b updates only while t < seq_depths[b]."""
         n_loops = n_loops or self.cfg.max_loop_iters
         B, T, D = h.shape
+
+        if seq_depths is not None:
+            seq_depths = seq_depths.to(device=h.device, dtype=torch.long)
+        else:
+            seq_depths = torch.full((B,), n_loops, device=h.device, dtype=torch.long)
 
         halted = torch.zeros(B, T, device=h.device, dtype=torch.bool)
         cumulative_p = torch.zeros(B, T, device=h.device)
@@ -292,6 +315,10 @@ class RecurrentBlock(nn.Module):
         loops_used_sum = 0  # track average loop iterations for ACT metrics
 
         for t in range(n_loops):
+            # A position runs this iteration only if not halted AND its sequence hasn't hit its depth
+            still_running = ~halted & (seq_depths > t).unsqueeze(-1)  # (B, T)
+            if not still_running.any():
+                break
             h_loop = loop_index_embedding(h, t, self.loop_dim)
             combined = self.norm(h_loop + e)
             trans_out = self.block(combined, freqs_cis, mask)
@@ -299,9 +326,8 @@ class RecurrentBlock(nn.Module):
             h = self.injection(h, e, trans_out)
 
             p = self.act(h)  # (B, T)
-            still_running = ~halted
 
-            # ACT remainder trick
+            # ACT remainder trick (only for sequences still running)
             remainder = (1.0 - cumulative_p).clamp(min=0)
             weight = torch.where(
                 cumulative_p + p >= self.cfg.act_threshold,
@@ -317,13 +343,11 @@ class RecurrentBlock(nn.Module):
             # Track how many positions used this loop iteration
             loops_used_sum += still_running.float().sum().item()
 
-            if halted.all():
-                break
-
-        # Return both output and ACT stats (loops_used_sum, total_positions)
+        # ACT stats
         total_positions = B * T
-        avg_loops = loops_used_sum / max(1, total_positions) if loops_used_sum > 0 else n_loops
+        avg_loops = loops_used_sum / max(1, total_positions) if loops_used_sum > 0 else float(n_loops)
         self.last_avg_loops = avg_loops  # store for logging
+        self.last_avg_depth = float(seq_depths.float().mean().item())  # RA-06: mean sampled depth
         return h_out
 
 
@@ -346,6 +370,7 @@ class NanoMythos(nn.Module):
         self.register_buffer("freqs_cis", freqs)
 
         self.prelude = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.prelude_layers)])
+        self.e_inj_norm = RMSNorm(cfg.dim)  # Parcae (RA-06): normalize injected prelude output e
         self.recurrent = RecurrentBlock(cfg)
         self.coda = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.coda_layers)])
 
@@ -367,7 +392,7 @@ class NanoMythos(nn.Module):
         mask = torch.full((1, 1, seq_len, seq_len), float("-inf"), device=device, dtype=dtype)
         return torch.triu(mask, diagonal=1)
 
-    def forward(self, input_ids: torch.Tensor, targets=None, reduction="mean", n_loops: int = None):
+    def forward(self, input_ids: torch.Tensor, targets=None, reduction="mean", n_loops: int = None, seq_depths=None):
         T = input_ids.shape[1]
         device = input_ids.device
 
@@ -379,7 +404,13 @@ class NanoMythos(nn.Module):
             x = layer(x, freqs_cis, mask)
 
         e = x  # encoded input frozen for injection every loop
-        x = self.recurrent(x, e, freqs_cis, mask, n_loops)
+        if self.cfg.parcae_e_norm:
+            # Parcae (paper Sec 4.1): e = LN(P(s)) stabilizes late-stage training
+            e = self.e_inj_norm(e)
+        # Parcae per-sequence depth sampling: only active during training; eval uses the
+        # full n_loops so val_bpb stays comparable across configs.
+        use_seq_depths = seq_depths if (seq_depths is not None and self.training and self.cfg.parcae_depth_sample) else None
+        x = self.recurrent(x, e, freqs_cis, mask, n_loops, seq_depths=use_seq_depths)
 
         for layer in self.coda:
             x = layer(x, freqs_cis, mask)
@@ -432,6 +463,49 @@ GB10_BF16_PEAK_FLOPS = 40e12
 
 
 # ---------------------------------------------------------------------------
+# RA-06 experiment override layer (env vars; defaults preserve original 24h run)
+# ---------------------------------------------------------------------------
+def _env_float(key, default):
+    v = os.environ.get(key)
+    return float(v) if v not in (None, "") else default
+
+def _env_int(key, default):
+    v = os.environ.get(key)
+    return int(float(v)) if v not in (None, "") else int(default)
+
+def _env_bool(key, default):
+    v = os.environ.get(key)
+    if v is None or v == "":
+        return default
+    return v.lower() in ("1", "true", "yes", "on")
+
+SEQ_LEN = _env_int("NANO_SEQ_LEN", SEQ_LEN)
+MICRO_BATCH = _env_int("NANO_MICRO_BATCH", MICRO_BATCH)
+GRAD_ACCUM = _env_int("NANO_GRAD_ACCUM", GRAD_ACCUM)
+TOTAL_BATCH_SIZE = MICRO_BATCH * SEQ_LEN * GRAD_ACCUM  # recomputed
+DEVICE_BATCH_SIZE = _env_int("NANO_DEVICE_BATCH", MICRO_BATCH)
+TIME_BUDGET = _env_int("NANO_TIME_BUDGET", TIME_BUDGET)
+EVAL_EVERY_N_STEPS = _env_int("NANO_EVAL_EVERY", EVAL_EVERY_N_STEPS)
+LOG_EVERY_N_STEPS = _env_int("NANO_LOG_EVERY", LOG_EVERY_N_STEPS)
+LEARNING_RATE = _env_float("NANO_LEARNING_RATE", LEARNING_RATE)
+WARMUP_STEPS = _env_int("NANO_WARMUP_STEPS", WARMUP_STEPS)
+GRAD_CLIP = _env_float("NANO_GRAD_CLIP", GRAD_CLIP)
+MAX_LOOP_ITERS = _env_int("NANO_MAX_LOOP_ITERS", 8)
+PARCAE_E_NORM = _env_bool("NANO_PARCAE_E_NORM", True)
+PARCAE_DEPTH_SAMPLE = _env_bool("NANO_PARCAE_DEPTH_SAMPLE", True)
+PARCAE_INIT = _env_bool("NANO_PARCAE_INIT", True)  # raise rho(A) init to ~0.95 (Parcae band top)
+CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
+# Estimate total steps from the time budget so the LR schedule decays to ~0 by
+# the end of a short run (the original hardcoded 999999 for the 24h run).
+STEP_TIME_EST = 8.0  # seconds per step (recurrent block, seq 512)
+EXPECTED_STEPS = max(50, int(TIME_BUDGET / STEP_TIME_EST))
+print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
+      f"time={TIME_BUDGET}s eval_every={EVAL_EVERY_N_STEPS} lr={LEARNING_RATE} "
+      f"loops={MAX_LOOP_ITERS} e_norm={PARCAE_E_NORM} depth_sample={PARCAE_DEPTH_SAMPLE} "
+      f"tag={CKPT_TAG}")
+
+
+# ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
 
@@ -455,13 +529,15 @@ cfg = NanoMythosConfig(
     n_heads=8,
     n_kv_heads=4,
     max_seq_len=MAX_SEQ_LEN,  # must cover eval seq_len (2048 from prepare.py)
-    max_loop_iters=8,
+    max_loop_iters=MAX_LOOP_ITERS,
     prelude_layers=2,
     coda_layers=2,
     rope_theta=10000.0,
     act_threshold=0.99,
     lora_rank=4,
     dropout=0.0,
+    parcae_e_norm=PARCAE_E_NORM,
+    parcae_depth_sample=PARCAE_DEPTH_SAMPLE,
 )
 
 with torch.device("meta"):
@@ -471,6 +547,13 @@ model.to_empty(device=device)
 freqs = precompute_rope_freqs(cfg.dim // cfg.n_heads, cfg.max_seq_len, cfg.rope_theta).to(device=device)
 model.register_buffer("freqs_cis", freqs, persistent=False)
 model._init_weights()
+# RA-06: raise the LTI injection init so rho(A) ~= 0.95 (Parcae band top).
+if PARCAE_INIT and hasattr(model.recurrent, "injection"):
+    model.recurrent.injection.apply_parcae_init()
+    print(f"[RA-06] Parcae LTI init applied: rho(A) = {model.recurrent.injection.spectral_radius():.4f}")
+else:
+    _rho0 = model.recurrent.injection.spectral_radius() if hasattr(model.recurrent, "injection") else float("nan")
+    print(f"[RA-06] original LTI init (no Parcae init): rho(A) = {_rho0:.4f}")
 
 num_params = model.num_params()
 print(f"Model: NanoMythos")
@@ -546,10 +629,16 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
 
+    # RA-06: per-sequence depth sampling (Poisson, mu = max_loop_iters).
+    # Only during training; each sequence in the micro-batch gets its own loop depth.
+    if cfg.parcae_depth_sample:
+        _seq_depths = torch.poisson(cfg.max_loop_iters * torch.ones(x.shape[0])).long().clamp(min=1)
+    else:
+        _seq_depths = None
     for micro_step in range(grad_accum_steps):
         try:
             with autocast_ctx:
-                loss = model(x, targets=y, reduction="mean", n_loops=cfg.max_loop_iters)
+                loss = model(x, targets=y, reduction="mean", n_loops=cfg.max_loop_iters, seq_depths=_seq_depths)
             train_loss = loss.detach()
             loss = loss / grad_accum_steps
             loss.backward()
@@ -562,7 +651,7 @@ while True:
             raise
 
     # LR schedule
-    lr = get_lr(step, 999999)
+    lr = get_lr(step, EXPECTED_STEPS)
     for group in optimizer.param_groups:
         group["lr"] = lr
 
@@ -593,11 +682,15 @@ while True:
     mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / GB10_BF16_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
     avg_loops = getattr(model.recurrent, 'last_avg_loops', cfg.max_loop_iters)
+    avg_depth = getattr(model.recurrent, 'last_avg_depth', cfg.max_loop_iters)
+    # RA-06: log spectral radius rho(A) of the LTI injection matrix.
+    _lti = model.recurrent.injection if hasattr(model.recurrent, 'injection') else None
+    rho_A = _lti.spectral_radius() if (_lti is not None and hasattr(_lti, 'spectral_radius')) else float('nan')
 
     print(
         f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lr: {lr:.6f} | "
         f"dt: {dt*1000:.0f}ms | tok/s: {tok_per_sec:,} | mfu: {mfu:.1f}% | "
-        f"avg_loops: {avg_loops:.1f}/{cfg.max_loop_iters} | "
+        f"avg_loops: {avg_loops:.1f}/{cfg.max_loop_iters} | avg_depth: {avg_depth:.1f} | rhoA: {rho_A:.3f} | "
         f"epoch: {epoch} | remaining: {remaining:.0f}s",
         end="",
         flush=True,
@@ -627,7 +720,7 @@ with autocast_ctx:
     val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
 
 # Save checkpoint
-checkpoint_path = os.path.join(os.path.dirname(__file__), "..", "checkpoints", "nano_mythos_final.pt")
+checkpoint_path = os.path.join(os.path.dirname(__file__), "..", "checkpoints", f"nano_mythos_{CKPT_TAG}.pt")
 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 torch.save({
     "model_state_dict": model.state_dict(),
