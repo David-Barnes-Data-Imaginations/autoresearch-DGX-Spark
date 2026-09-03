@@ -249,9 +249,10 @@ class LTIInjection(nn.Module):
 
     @torch.no_grad()
     def apply_parcae_init(self):
-        """Set log_A/log_dt so rho(A) ~= 0.95 (Parcae band top). No-op otherwise (ZOH keeps it <1)."""
-        self.log_A.data.fill_(-0.05)
-        self.log_dt.data.fill_(-2.0)
+        """Set log_A/log_dt so rho(A) ~= 0.95 (Parcae band top).
+        rho = exp(-exp(log_dt+log_A)); solve log_dt+log_A = ln(-ln(0.95)) = -2.97."""
+        self.log_A.data.fill_(0.03)
+        self.log_dt.data.fill_(-3.0)
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, transformer_out: torch.Tensor) -> torch.Tensor:
         A = self.get_A()
@@ -317,8 +318,6 @@ class RecurrentBlock(nn.Module):
         for t in range(n_loops):
             # A position runs this iteration only if not halted AND its sequence hasn't hit its depth
             still_running = ~halted & (seq_depths > t).unsqueeze(-1)  # (B, T)
-            if not still_running.any():
-                break
             h_loop = loop_index_embedding(h, t, self.loop_dim)
             combined = self.norm(h_loop + e)
             trans_out = self.block(combined, freqs_cis, mask)
@@ -340,8 +339,21 @@ class RecurrentBlock(nn.Module):
             cumulative_p = cumulative_p + p * still_running.float()
             halted = halted | (cumulative_p >= self.cfg.act_threshold)
 
+            # RA-06 depth-completion term: a sequence reaching its sampled depth
+            # before ACT-halting must still contribute its remaining probability to
+            # h_out (the ACT trick sums to 1 only across the FULL depth). Without
+            # this, short-depth sequences would emit ~zero output.
+            finished_at_t = (seq_depths == (t + 1)).unsqueeze(-1) & still_running
+            if finished_at_t.any():
+                completion_mask = finished_at_t & ~halted  # exclude ACT-halted (already full-remainder)
+                completion_weight = ((1.0 - cumulative_p).clamp(min=0)) * completion_mask.float()
+                h_out = h_out + completion_weight.unsqueeze(-1) * h
+
             # Track how many positions used this loop iteration
             loops_used_sum += still_running.float().sum().item()
+
+            if not (~halted & (seq_depths > (t + 1)).unsqueeze(-1)).any():
+                break
 
         # ACT stats
         total_positions = B * T
@@ -490,6 +502,7 @@ LOG_EVERY_N_STEPS = _env_int("NANO_LOG_EVERY", LOG_EVERY_N_STEPS)
 LEARNING_RATE = _env_float("NANO_LEARNING_RATE", LEARNING_RATE)
 WARMUP_STEPS = _env_int("NANO_WARMUP_STEPS", WARMUP_STEPS)
 GRAD_CLIP = _env_float("NANO_GRAD_CLIP", GRAD_CLIP)
+MAX_STEPS = _env_int("NANO_MAX_STEPS", 0)  # 0 = run to TIME_BUDGET; else hard stop
 MAX_LOOP_ITERS = _env_int("NANO_MAX_LOOP_ITERS", 8)
 PARCAE_E_NORM = _env_bool("NANO_PARCAE_E_NORM", True)
 PARCAE_DEPTH_SAMPLE = _env_bool("NANO_PARCAE_DEPTH_SAMPLE", True)
@@ -499,6 +512,8 @@ CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # the end of a short run (the original hardcoded 999999 for the 24h run).
 STEP_TIME_EST = 8.0  # seconds per step (recurrent block, seq 512)
 EXPECTED_STEPS = max(50, int(TIME_BUDGET / STEP_TIME_EST))
+if MAX_STEPS > 0:
+    EXPECTED_STEPS = max(50, MAX_STEPS)  # LR schedule targets the hard stop
 print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"time={TIME_BUDGET}s eval_every={EVAL_EVERY_N_STEPS} lr={LEARNING_RATE} "
       f"loops={MAX_LOOP_ITERS} e_norm={PARCAE_E_NORM} depth_sample={PARCAE_DEPTH_SAMPLE} "
@@ -705,6 +720,10 @@ while True:
         print(f"\n  [EVAL] step {step} | val_bpb: {val_bpb:.6f} | train_loss: {debiased_smooth_loss:.6f}")
 
     step += 1
+
+    # RA-06: hard step stop (for fixed-step head-to-head ablations)
+    if MAX_STEPS > 0 and step >= MAX_STEPS:
+        break
 
     # Time's up
     if step > 10 and total_training_time >= TIME_BUDGET:

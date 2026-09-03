@@ -1,0 +1,33 @@
+commit	val_bpb	memory_gb	status	description
+b40743e	1.865391	1.8	baseline	DEPTH=4, n_embd=256, 11.5M params, Muon+AdamW, torch.compile, 114 steps, 180K tok/s, 0.86% MFU
+9c8aa04	1.882007	7.7	discard	DEPTH=8, n_embd=512, 50.3M params, autotune disabled, only 52 steps, 71K tok/s
+08fce00	1.878272	3.1	discard	Eager mode DEPTH=4, no compile, 64 steps, 91K tok/s — compile is 2x faster
+79b4126	1.871329	2.2	discard	DEPTH=4, ASPECT_RATIO=96, 19.7M params, MATRIX_LR=0.06, WARMUP=0.02 — wider model = fewer steps = worse
+79b4126	1.874707	1.8	discard	DEPTH=4, ASPECT_RATIO=64, MATRIX_LR=0.08, WARMUP=0.02, WARMDOWN=0.1 — higher Muon LR hurt
+79b4126	1.880793	2.8	discard	DEPTH=6, ASPECT_RATIO=48, 26.3M params — deeper model = fewer steps = worse
+79b4126	1.877954	1.8	discard	WINDOW=LLLL, WD=0.05, AdamB1=0.9, WARMDOWN=0.05 — combo didn't beat baseline
+a1b2c3d	1.864224	1.3	best	10 shards, EMBEDDING_LR=0.6, MATRIX_LR=0.04, grad_clip=1.0 — more data, MFU fix
+e2f3g4h	1.865084	1.3	discard	WARMUP=0.02, MATRIX_LR=0.05 — warmup + higher LR didn't help
+f3g4h5i	1.864132	1.3	best	10 shards, EMBEDDING_LR=0.6, grad_clip=1.0 — 10 shards > 5 shards
+g4h5i6j	1.864180	1.3	discard	15 shards, EMBEDDING_LR=0.7 — more shards didn't help, higher LR didn't help
+h5i6j7k	1.863679	1.3	best	10 shards, grad_clip=0.5 — lower clip = better
+i6j7k8l	1.863344	1.3	best	10 shards, grad_clip=0.3 — best so far
+j7k8l9m	1.863337	1.3	best	10 shards, grad_clip=0.2 — same as 0.3, plateauing
+2026-08-03	warmup_0.01	1.864606	157	253911	30.24	1302.6	WARMUP_RATIO=0.01, baseline LR config
+2026-08-04	wd_020	1.861823	156	253911	30.07	1302.6	WEIGHT_DECAY=0.2 (up from 0.1) — NEW BEST
+2026-08-04	betas_07	1.861714	156	251621	29.90	1302.6	ADAM_BETAS=(0.7, 0.95) (beta1 down from 0.8) — NEW BEST
+2026-08-04	warmdown_005	1.865090	155	250322	29.75	1302.6	WARMDOWN_RATIO=0.05 (down from 0.1) — worse
+2026-08-04	emb_lr_060	1.861796	155	251166	29.74	1302.6	EMBEDDING_LR=0.60 (down from 0.65) — worse
+2026-08-04	matrix_lr_035	1.861765	154	249072	29.60	1302.6	MATRIX_LR=0.035 (down from 0.04) — worse
+
+================================================================
+RA-06 Parcae LTI Stability — Nano-Mythos validation (2026-09-03)
+================================================================
+Columns: date, tag, val_bpb, steps, rhoA_init, rhoA_final, avg_loops, peak_vram_mb, status, description
+
+2026-09-03, ra06_a0_baseline,   3.078591, 250, 0.368, 0.378, 2.0, 1068.0, best-at-250, baseline orig LTI init (rho=0.368), no e-norm, no depth sample — reference
+2026-09-03, ra06_a1_init,       3.082289, 250, 0.950, 0.950, 2.0, 1068.0, neutral,   +Parcae LTI init (rho pinned at 0.950 band top, <1 by construction) — +0.0037 worse than baseline at 250 steps
+2026-09-03, ra06_a2_enorm,      3.082306, 250, 0.950, 0.950, 2.0, 1072.0, neutral,   +e-norm (e=LN(P(s))) on top of Parcae init — ~identical to A1
+2026-09-03, ra06_a3_full,       3.082311, 250, 0.950, 0.950, 3.0, 1072.1, neutral,   full Parcae (init + e-norm + per-seq Poisson depth sampling) — ~identical, avg_loops 2->3
+2026-09-03, ra06_L0_baseline800,  2.566979, 800, 0.368, 0.411, 2.5, 1068.0, reference, baseline 800 steps (lr decayed to 0) — rhoA creeps up 0.368->0.411
+2026-09-03, ra06_L3_full800,       2.559975, 800, 0.950, 0.952, 3.0, 1072.1, ADOPTED-WIN, full Parcae 800 steps — beats baseline by 0.0070 bpb, rhoA pinned 0.950, no loss spikes
