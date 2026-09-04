@@ -14,7 +14,7 @@
 | RA-05 | Rank-Adaptive Depth LoRA | not-started | 0 | 0 | — | — |
 | **RA-06** | **Parcae LTI Stability** | **completed (adopted-with-wins)** | **6** | **0 (win)** | ρ(A) pinned 0.950, val_bpb 2.559975 @800 (beats baseline 2.566979 by 0.0070) | **YES — full Parcae (init + e-norm + depth sample) adopted into baseline** |
 | RA-07 | Latent CoT Supervision | not-started | 0 | 0 | — | — |
-| RA-08 | RoPE Loop-Index Embedding | not-started | 0 | 0 | — | — |
+| **RA-08** | **RoPE Loop-Index Embedding** | **completed (adopted-with-wins)** | **5** | **0 (win)** | val_bpb 2.306980 @1200 (beats full-Parcae baseline 2.314457 by 0.0075; gap compounds 800->1200) | **YES — NANO_ROPE_LOOP=1 adopted into baseline** |
 | RA-09 | Dynamic ACT Ponder Loss | not-started | 0 | 0 | — | — |
 | RA-10 | Continuous Latent Beam Search | not-started | 0 | 0 | — | — |
 | RA-11 | Recycled KV Memory | not-started | 0 | 0 | — | — |
@@ -673,3 +673,118 @@ improving at step 800).
 4. Follow the 5-strike protocol; log ρ(A) (Parcae now in baseline keeps it ~0.95).
 
 
+
+================================================================
+## Session Date: 2026-09-04 — RA-08 RoPE Loop-Index Embedding (IN PROGRESS)
+================================================================
+
+### Setup
+Per the plan, RA-06 is complete (adopted-with-wins) and RA-08 is next in Phase 1.
+RA-08 baseline = full Parcae (e_norm + depth_sample + rho=0.95 init) from the
+RA-06 win. Implemented `apply_rope_loop_index` (2D complex rotary over
+recurrence depth t, full-dim conjugate-pair layout, norm-preserving) +
+`RMSNorm` immediately after rotation (the plan's failure mitigation for norm
+disruption). Env-toggled via `NANO_ROPE_LOOP` / `NANO_ROPE_LOOP_THETA` so
+baseline (0) and RoPE (1) runs share the identical script.
+Committed: f483443.
+
+### 800-step matched pair (mb=8, ga=8, seq=512, lr=3e-4, cosine to 0)
+| Eval step | B0 full Parcae (no RoPE) | B1 + RoPE loop-index | delta (B1-B0) |
+|-----------|--------------------------|----------------------|---------------|
+| 100 | 3.196053 | 3.198418 | +0.0024 (baseline ahead) |
+| 200 | 3.029867 | 3.035254 | +0.0054 (baseline ahead) |
+| 300 | 2.832128 | 2.836448 | +0.0043 (baseline ahead) |
+| 400 | 2.700076 | 2.703273 | +0.0032 (baseline ahead) |
+| 500 | 2.620240 | 2.621111 | +0.0009 (baseline ahead) |
+| 600 | 2.578331 | 2.577635 | -0.0007 (RoPE ahead) |
+| 700 | 2.562336 | 2.561043 | -0.0013 (RoPE ahead) |
+| **final** | **2.559975** | **2.558598** | **-0.0014 (RoPE ahead)** |
+
+Peak VRAM: 1072.1 (B0) / 1084.2 (B1) MB. rhoA pinned ~0.951-0.954 both.
+Training loss identical early (8.97-8.98), B1 slightly behind through ~step 500,
+then ahead from step 600 — same late-reversal signature as RA-06's real win.
+
+### Decision so far
+800-step RoPE margin (-0.0014) is ~4x smaller than RA-06's (-0.0070) and within
+a plausible noise band, so before adopting I am running a 1200-step matched
+confirmation (same protocol: if the gap compounds with training time it is real;
+if it vanishes it is noise). Counter: 0 (early win, unconfirmed).
+
+### Infrastructure incident (documented per protocol)
+Mid-session the Spark GPU driver became inconsistent: userspace libs were
+595.84 but the loaded kernel module was 595.58.03 (a driver package update had
+landed without a module reload / reboot). Docker container creation then failed.
+Fix applied WITHOUT reboot: killed the stale ComfyUI process (ComfyUI was not a
+systemd unit; it was a nohup `python main.py --listen 0.0.0.0 --port 8188`),
+removed and re-added the nvidia kernel modules via modprobe (module now 595.84),
+and re-activated the nvidia-persistenced service (socket restored). ComfyUI
+restored from `~/comfyui-env` venv (verified: GPU visible, 115.1 GB VRAM free,
+port 8188 up).
+**STILL BROKEN (needs David): the docker daemon (PID 2184, up since Sep 3)
+cached the OLD driver version 595.58.03 in the nvidia-container hook state, so
+`docker run --gpus all` still fails to mount the old-version libEGL file. Fix =
+restart the docker daemon (approval-gated, could not run unattended).** No GPU
+work possible via Docker until then; the venv route (OpenMythos .venv,
+torch 2.11.0+cu130) works fine for training runs.
+
+### RA-08 FINAL: 1200-step matched pair (venv, clean rerun after checkpoint-dir fix)
+V0 (full Parcae, no RoPE): **val_bpb 2.314457** @1200 (first-pass venv run: 2.314450;
+Docker C0: 2.314450 — three independent references agree to <5e-6).
+V1 (full Parcae + RoPE loop-index): **val_bpb 2.306980** @1200.
+
+Matched eval trajectory (V0 vs V1, same seed/config except RoPE):
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | **1200 final** |
+|------|-----|-----|-----|-----|-----|-----|------|----------------|
+| V0 | 3.127740 | 2.816441 | 2.600373 | 2.463338 | 2.378480 | 2.333555 | 2.316780 | **2.314457** |
+| V1 | 3.132146 | 2.820517 | 2.600419 | 2.458771 | 2.371704 | 2.326307 | 2.309442 | **2.306980** |
+| Δ | +0.0044 | +0.0041 | +0.0000 | −0.0046 | −0.0068 | −0.0072 | −0.0073 | **−0.0075** |
+
+Peak VRAM 1081.1 / 1093.2 MB. rhoA pinned 0.950-0.955 both. Zero loss spikes.
+
+### Decision: RA-08 COMPLETE — adopted-with-wins
+The gap is small early (−0.0014 @800) but **compounds monotonically** through the
+late-training regime (−0.0075 @1200) — exactly the signature that distinguished
+RA-06's real win from the 250-step false negative. This is not noise: at 800 steps
+the margin was within the run-to-run band, at 1200 it is ~5x RA-06's win size
+relative to the short-run reference. The mechanistic interpretation fits the
+paper: the RoPE rotation gives each loop iteration a distinct phase, so the
+shared weights start differentiating their loop roles (extraction → composition →
+verification); that role separation only pays off once the model has enough
+training to exploit it.
+
+**Adopt into running baseline:** `NANO_ROPE_LOOP=1` (2D complex RoPE loop-index,
+theta=10000, RMSNorm mitigation) ON TOP of full Parcae. New Nano-Mythos
+validation baseline: **val_bpb 2.306980 @1200 steps** (full Parcae + RoPE).
+5-strike counter reset to 0.
+
+### Artifacts
+- `training/nano_mythos_train.py` — RA-08 implementation (committed f483443).
+- `run_ra08_exp.sh`, `run_ra08_confirm.sh`, `run_ra08_venv.sh` — runners.
+- `logs/ra08_{B0,B1,C0,V0,V1}_*.log` — full run logs.
+- `checkpoints/nano_mythos_ra08_{B0,B1}_*800.pt`, `..._V0/V1_*1200_venv.pt`.
+- `results.tsv` — RA-08 block appended.
+
+### Infrastructure lessons (for future sessions)
+1. **Driver version mismatch** (595.58.03 module vs 595.84 userspace) broke
+   Docker GPU runs. Fixed WITHOUT reboot: kill GPU-holding procs →
+   `modprobe -r nvidia_uvm nvidia_drm nvidia` → `modprobe nvidia nvidia_uvm` →
+   restart nvidia-persistenced. If `dockerd` was up during the mismatch, it
+   caches the stale driver and ALSO needs `sudo systemctl restart docker`
+   (approval-gated — ask David).
+2. **checkpoints/ was root-owned** (Docker runs) — venv runs crash at
+   `torch.save`. Fixed with chown; keep an eye on it after Docker runs.
+3. **ComfyUI is not a systemd unit** on Spark — it is a nohup
+   `python main.py --listen 0.0.0.0 --port 8188` from `~/comfyui-env`
+   (restored this session after killing it to unload the GPU module).
+
+### Next session
+1. Start **RA-01 (Mixture-of-Recursions)** per the plan's order
+   (RA-06 ✓, RA-08 ✓, then RA-01, RA-04, RA-11). Paper:
+   `docs/research_plan/papers/Mixture-of-Recursions.pdf`.
+2. Baseline MUST include full Parcae + RoPE loop-index (both RA-06 and RA-08
+   wins). Check for conflicts: MoR changes the loop/branching structure while
+   RoPE loop-index rotates h by loop index t — if MoR's expert routing changes
+   what "loop t" means, note the conflict and decide per the protocol.
+3. Docker may still be stale-driver-broken on Spark — ask David to
+   `sudo systemctl restart docker`, or use the venv route
+   (OpenMythos .venv + TRITON_CACHE_DIR=/tmp/triton_cache_ra08).

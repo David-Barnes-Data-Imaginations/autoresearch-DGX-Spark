@@ -31,3 +31,15 @@ Columns: date, tag, val_bpb, steps, rhoA_init, rhoA_final, avg_loops, peak_vram_
 2026-09-03, ra06_a3_full,       3.082311, 250, 0.950, 0.950, 3.0, 1072.1, neutral,   full Parcae (init + e-norm + per-seq Poisson depth sampling) — ~identical, avg_loops 2->3
 2026-09-03, ra06_L0_baseline800,  2.566979, 800, 0.368, 0.411, 2.5, 1068.0, reference, baseline 800 steps (lr decayed to 0) — rhoA creeps up 0.368->0.411
 2026-09-03, ra06_L3_full800,       2.559975, 800, 0.950, 0.952, 3.0, 1072.1, ADOPTED-WIN, full Parcae 800 steps — beats baseline by 0.0070 bpb, rhoA pinned 0.950, no loss spikes
+
+================================================================
+RA-08 RoPE Loop-Index Embedding — Nano-Mythos validation (2026-09-04)
+================================================================
+Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status, description
+
+2026-09-04, ra08_B0_baseline800,  2.559975, 800, 0.952, 2.83, 1072.1, reference, full Parcae (RA-06 win), no RoPE — RA-08 800-step baseline; reproduces RA-06 L3 exactly (2.559975)
+2026-09-04, ra08_B1_rope800,      2.558598, 800, 0.954, 2.04, 1084.2, early-win, +RoPE loop-index (2D complex rotary over depth t, theta=10000, RMSNorm mitigation) — -0.0014 vs baseline @800 (below noise floor, hence 1200-step confirmation)
+2026-09-04, ra08_C0_baseline1200, 2.314450, 1200, 0.952, 2.1, 1072.1, reference, full Parcae 1200 steps (Docker torch 25.12) — matches venv V0 to 7e-6, confirms determinism
+2026-09-04, ra08_C1_rope1200,     FAILED, 0, -, -, -, infra-fail, Docker container creation failed (dockerd cached stale driver 595.58.03) — NOT a training failure; driver fixed via kernel module reload; venv pair V0/V1 supersedes
+2026-09-04, ra08_V0_baseline1200, 2.314457, 1200, 0.952, 2.0, 1081.1, reference, full Parcae 1200 steps (venv, clean rerun) — first pass also 2.314450 (deterministic)
+2026-09-04, ra08_V1_rope1200,     2.306980, 1200, 0.955, 2.21, 1093.2, ADOPTED-WIN, full Parcae + RoPE loop-index 1200 steps — beats baseline by 0.0075 bpb; gap compounds: +0.0044@150 -> -0.0046@600 -> -0.0073@1050 -> -0.0075@1200 (late-reversal signature of a real mechanism)
