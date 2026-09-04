@@ -62,6 +62,9 @@ class NanoMythosConfig:
     # --- RA-06: Parcae LTI Stability (paper Sec 4.1 / 4.2) ---
     parcae_e_norm: bool = True      # e = LN(P(s)): normalize injected prelude output (loss-spike fix)
     parcae_depth_sample: bool = True  # per-sequence Poisson depth sampling during training
+    # --- RA-08: RoPE Loop-Index Embedding ---
+    rope_loop: bool = False          # rotate full h by 2D complex RoPE over loop index t
+    rope_loop_theta: float = 10000.0
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +202,32 @@ def loop_index_embedding(h: torch.Tensor, loop_t: int, loop_dim: int, theta: flo
 
 
 # ---------------------------------------------------------------------------
+# RA-08: RoPE loop-index embedding (2D complex rotary over recurrence depth)
+# Paper: "A Mechanistic Analysis of Looped Reasoning Language Models"
+# Rotates the FULL hidden state by loop iteration t so shared weights see a
+# distinct phase each loop (extraction -> composition -> verification).
+# Mitigation (plan): RMSNorm immediately after rotation to keep norms stable.
+# ---------------------------------------------------------------------------
+
+def apply_rope_loop_index(h: torch.Tensor, loop_t: int, theta: float = 10000.0) -> torch.Tensor:
+    """Rotate h (B, T, D) by loop index t using a 2D complex RoPE over depth.
+
+    Conjugate-pair layout: channels (2i, 2i+1) form complex pairs, so the
+    rotated output is contiguous and norms are preserved exactly.
+    """
+    dim = h.shape[-1]
+    half = dim // 2
+    freqs = 1.0 / (theta ** (torch.arange(0, half, dtype=torch.float32, device=h.device) / half))
+    angle = loop_t * freqs  # (half,)
+    x = h.float().reshape(*h.shape[:-1], half, 2)
+    re, im = x[..., 0], x[..., 1]
+    cos_a, sin_a = torch.cos(angle), torch.sin(angle)
+    out_re = re * cos_a - im * sin_a
+    out_im = re * sin_a + im * cos_a
+    return torch.stack([out_re, out_im], dim=-1).reshape(h.shape).to(h.dtype)
+
+
+# ---------------------------------------------------------------------------
 # Depth-wise LoRA adapter
 # ---------------------------------------------------------------------------
 
@@ -297,6 +326,10 @@ class RecurrentBlock(nn.Module):
         self.lora = LoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
         self.norm = RMSNorm(cfg.dim)
         self.loop_dim = cfg.dim // 8  # fraction of channels receiving loop-index embedding
+        # RA-08: RoPE loop-index rotation over full dim (optional)
+        self.rope_loop = cfg.rope_loop
+        self.rope_loop_theta = cfg.rope_loop_theta
+        self.rope_loop_norm = RMSNorm(cfg.dim) if cfg.rope_loop else None
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -318,7 +351,12 @@ class RecurrentBlock(nn.Module):
         for t in range(n_loops):
             # A position runs this iteration only if not halted AND its sequence hasn't hit its depth
             still_running = ~halted & (seq_depths > t).unsqueeze(-1)  # (B, T)
-            h_loop = loop_index_embedding(h, t, self.loop_dim)
+            if self.rope_loop:
+                # RA-08: full-dim 2D complex RoPE rotation by loop index t,
+                # then RMSNorm (plan's failure mitigation for norm disruption).
+                h_loop = self.rope_loop_norm(apply_rope_loop_index(h, t, self.rope_loop_theta))
+            else:
+                h_loop = loop_index_embedding(h, t, self.loop_dim)
             combined = self.norm(h_loop + e)
             trans_out = self.block(combined, freqs_cis, mask)
             trans_out = trans_out + self.lora(trans_out, t)
@@ -507,6 +545,8 @@ MAX_LOOP_ITERS = _env_int("NANO_MAX_LOOP_ITERS", 8)
 PARCAE_E_NORM = _env_bool("NANO_PARCAE_E_NORM", True)
 PARCAE_DEPTH_SAMPLE = _env_bool("NANO_PARCAE_DEPTH_SAMPLE", True)
 PARCAE_INIT = _env_bool("NANO_PARCAE_INIT", True)  # raise rho(A) init to ~0.95 (Parcae band top)
+ROPE_LOOP = _env_bool("NANO_ROPE_LOOP", False)  # RA-08: RoPE loop-index rotation
+ROPE_LOOP_THETA = _env_float("NANO_ROPE_LOOP_THETA", 10000.0)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -517,7 +557,7 @@ if MAX_STEPS > 0:
 print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"time={TIME_BUDGET}s eval_every={EVAL_EVERY_N_STEPS} lr={LEARNING_RATE} "
       f"loops={MAX_LOOP_ITERS} e_norm={PARCAE_E_NORM} depth_sample={PARCAE_DEPTH_SAMPLE} "
-      f"tag={CKPT_TAG}")
+      f"rope_loop={ROPE_LOOP} rope_theta={ROPE_LOOP_THETA} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +593,8 @@ cfg = NanoMythosConfig(
     dropout=0.0,
     parcae_e_norm=PARCAE_E_NORM,
     parcae_depth_sample=PARCAE_DEPTH_SAMPLE,
+    rope_loop=ROPE_LOOP,
+    rope_loop_theta=ROPE_LOOP_THETA,
 )
 
 with torch.device("meta"):
