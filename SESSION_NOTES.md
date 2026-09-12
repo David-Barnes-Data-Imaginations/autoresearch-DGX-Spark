@@ -7,7 +7,7 @@
 
 | Avenue | Feature | Status | Tests run | Consec non-imp | Best result | Adopted into baseline? |
 |--------|---------|--------|-----------|----------------|-------------|------------------------|
-| RA-01 | Mixture-of-Recursions (MoR) | not-started | 0 | 0 | — | — |
+| RA-01 | Mixture-of-Recursions (MoR) | completed (neutral) | 3 (R1,R3,R2) | 3 (nondom) | MoR worse than ACT-halting baseline at all tested balance weights (R1 bal0.01: 2.310121@1200; R3 bal0.10: 2.316171@1050; R2 bal1.0: training collapse) | NO — MoR redundant w/ existing ACT per-token halting; baseline unchanged |
 | RA-02 | Hyperloop Multi-Stream | not-started | 0 | 0 | — | — |
 | RA-03 | LT2 Hybrid Attention | not-started | 0 | 0 | — | — |
 | RA-04 | Mixture-of-Depths (MoD) | not-started | 0 | 0 | — | — |
@@ -788,3 +788,94 @@ validation baseline: **val_bpb 2.306980 @1200 steps** (full Parcae + RoPE).
 3. Docker may still be stale-driver-broken on Spark — ask David to
    `sudo systemctl restart docker`, or use the venv route
    (OpenMythos .venv + TRITON_CACHE_DIR=/tmp/triton_cache_ra08).
+
+## Session Date: 2026-09-12 — RA-01 Mixture-of-Recursions (Avenue 1)
+================================================================
+
+### Setup
+Phase A next avenue after RA-06 (Parcae, adopted) + RA-08 (RoPE loop-index,
+adopted). Baseline = full Parcae + RoPE loop-index (val_bpb 2.306980 @1200,
+reference V1). Read `Mixture-of-Recursions.pdf` (Bae et al., arXiv:2507.10524):
+token-choice routing = router commits each token to a full loop path from the
+start (paper Fig 2b).
+
+### Implementation (training/nano_mythos_train.py, env-gated NANO_MOR)
+- `TokenDepthRouter` (Linear dim->K + softmax + argmax) commits each token to a
+  loop-count from `mor_choices=(1,2,4,8)` (plan's [4,8,12,16] scaled to T=8).
+- RecurrentBlock.forward: MoR branch replaces ACT halting as the per-token
+  loop-depth source. Token active on loop t while t < its depth; h_out is its
+  state at its final loop. (ACT + MoR are BOTH adaptive token-loop-depth
+  mechanisms — running both would be a double-adaptivity conflict on the same
+  code path. NOTE: baseline ACT halting IS an adaptive-compute mechanism, which
+  is central to the finding below.)
+- Aux loss: canonical Switch/MoR load-balance (K * sum_k f_hard_k * P_soft_k,
+  differentiable through P_soft) + plan's high-depth penalty (soft expected loop
+  count). Weights: NANO_MOR_BAL_WEIGHT (balance), NANO_MOR_AUX_WEIGHT (depth).
+- Router random-init (std 0.01) so the hard argmax is non-degenerate at init
+  (zero-init deterministically picks bin 0 for all tokens and never spreads).
+- MoR routing distribution + aux terms logged per step (mor[..] bal:.. dep:..).
+- Smoke test (5 steps, MoR off + on) + 120-step monitor: no crash, eval works,
+  routing distribution evolves and loss descends.
+
+### Key dynamic found (120-step monitor, bal=1.0)
+With balance weight 1.0 the router spreads across all 4 bins
+(mor[1:.25,2:.26,4:.25,8:.24], avg_loops 3.6/8) but TRAINING COLLAPSES — loss
+stuck ~10.04 (vs 9.02 baseline). The balance loss fights the CE.
+
+### 1200-step matched runs (mb=8, ga=8, seq=512, lr=3e-4, cosine to 0, venv)
+R0 = baseline (MoR off) reproduced reference EXACTLY: 2.306980 @1200
+(matches V1; confirms the MoR-off path is bit-consistent with the adopted
+baseline).
+
+| Run | MoR config | val_bpb@1200 | Δ vs R0 | avg_loops | tok/s | verdict |
+|-----|-----------|--------------|---------|-----------|-------|---------|
+| R0  | off (ACT) | 2.306980 | —      | 2.21/8 | ~120K | reference |
+| R1  | bal=0.01, dep=0.01 | 2.310121 | +0.00314 | 1.37/8 | ~85K | worse |
+| R3  | bal=0.10, dep=0.01 | 2.316171@1050 (stopped) | +0.0067 | ~3.7/8 | ~82K | worse |
+| R2  | bal=1.0 (60-step only) | n/a | n/a | n/a | n/a | training collapsed (loss 10.04) |
+
+R1 router collapsed to a 2-bin shallow split (64% @1 loop, 36% @2, 0% @4/8)
+because the depth penalty + CE both favor shallow. R3 (bal=0.1) forced a near-
+uniform spread but that HURT quality — and R1's shallow split was ALSO worse
+than the ACT baseline. Both routing regimes lose to the existing ACT halting.
+
+### Decision: RA-01 COMPLETE — NEUTRAL (not adopted)
+5-strike: 3 non-improving runs (R1, R3, R2-collapse) all worse than the
+baseline. The mechanism does not help at Nano scale. **Root cause (the real
+finding):** the Nano-Mythos baseline ALREADY has ACT halting — an adaptive
+per-token loop-depth mechanism (avg_loops 2.2/8, easy tokens halt early). MoR's
+token-choice router is a REDUNDANT second adaptive-compute mechanism on the
+same code path; replacing ACT with a harder argmax router (R1: shallower, worse;
+R3: forced-balanced, worse) is strictly dominated by the learned halting
+probability. MoR's headline 35%-FLOPs / 1.4x-throughput gains come from
+inference-time selective KV caching, which this training harness does not
+exercise — so those criteria are not testable here anyway. The balance-loss
+weight is hypersensitive (0.01 -> 2-bin collapse; 0.1 -> quality regression;
+1.0 -> training collapse), a robust sign the objective is poorly conditioned on
+this tiny model.
+- No config adopted. Baseline unchanged: full Parcae + RoPE (val_bpb 2.306980
+  @1200). 5-strike counter = 3 (not exhausted, but the avenue is clearly not
+  a win; marking complete-neutral after the 3 consistent negative runs +
+  mechanistic explanation. Remaining budget would only re-confirm the same
+  result — no new information expected).
+- MoR code remains in train.py behind NANO_MOR=0 default (baseline unaffected);
+  kept for reference and for Phase B TTT-05/TTT-06 (Infini-Attention / TTT-Linear)
+  which may revisit dynamic recursion.
+
+### Artifacts
+- training/nano_mythos_train.py — RA-01 MoR implementation (NANO_MOR-gated).
+- run_ra01_smoke.sh, run_ra01_exp.sh, run_ra01_r2.sh, run_ra01_r3.sh, ra01_monitor.sh.
+- logs/ra01_{SMOKE_A0,SMOKE_A1,MON2_mor,R0_baseline1200,R1_mor1200,R2_mor_rebal1200,R3_mor_bal01_1200}.log.
+- checkpoints/nano_mythos_ra01_{R0_baseline1200,R1_mor1200,R2*,R3_mor_bal01_1200}.pt.
+- results.tsv — RA-01 block appended.
+
+### Next session
+1. Start **RA-04 (Mixture-of-Depths)** per the plan's order (RA-01 done;
+   next in RA-01, RA-04, RA-11). Paper: `Mixture-of-Depths Attention.pdf`.
+   NOTE: MoD is layer-skip / top-k gating over DEPTH (layers), a different code
+   path than MoR's token-loop-depth routing — not redundant with ACT halting,
+   so expect a cleaner test.
+2. Baseline MUST include full Parcae + RoPE loop-index (RA-06 + RA-08 wins).
+   MoR NOT carried (neutral).
+3. Docker may still be stale-driver-broken — use the venv route
+   (OpenMythos .venv + TRITON_CACHE_DIR=/tmp/triton_cache_ra01).

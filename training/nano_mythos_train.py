@@ -65,6 +65,11 @@ class NanoMythosConfig:
     # --- RA-08: RoPE Loop-Index Embedding ---
     rope_loop: bool = False          # rotate full h by 2D complex RoPE over loop index t
     rope_loop_theta: float = 10000.0
+    # --- RA-01: Mixture-of-Recursions (token-choice routing) ---
+    mor: bool = False                # router assigns per-token recursion depths (replaces ACT as depth source)
+    mor_choices: tuple = (1, 2, 4, 8)  # loop-count per routing bin (scaled to max_loop_iters)
+    mor_aux_weight: float = 0.01     # weight for the high-depth penalty term
+    mor_bal_weight: float = 0.01     # weight for the load-balance term
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +308,39 @@ class ACTHalting(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# RA-01: Mixture-of-Recursions — token-choice TokenDepthRouter
+# ---------------------------------------------------------------------------
+# Paper (Bae et al., arXiv:2507.10524): a lightweight router assigns each token a
+# target recursion depth; tokens that reach their depth halt early and stop
+# receiving updates (MoR Fig 2b token-choice). Here the router is applied ONCE
+# to the prelude output e (input to the recurrent block), committing each token
+# to a full loop path — the paper's token-choice strategy. This is Nano-scale:
+# we route over `mor_choices` loop-count bins rather than the paper's full
+# T=16, and we skip the inference-time KV-caching gains (not exercised in this
+# training harness) — so the FLOPs/throughput criteria are not directly testable.
+class TokenDepthRouter(nn.Module):
+    """Token-choice router: maps per-token hidden state to a loop-count choice."""
+    def __init__(self, dim: int, choices: tuple):
+        super().__init__()
+        self.choices = tuple(choices)          # loop count per bin, ascending
+        self.max_depths = len(choices)
+        # Small RANDOM init (not zeros): with zero logits the hard argmax
+        # deterministically picks bin 0 for every token and never spreads. A
+        # small random logit spread makes the hard depth assignment non-degenerate
+        # at init so the CE + balance losses have a non-zero gradient to refine.
+        self.proj = nn.Linear(dim, self.max_depths)
+        nn.init.normal_(self.proj.weight, std=0.01)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x: torch.Tensor):
+        """x: (B, T, dim) -> (depths (B,T) long loop-count, probs (B,T,K))."""
+        logits = self.proj(x)                     # (B, T, K)
+        probs = F.softmax(logits, dim=-1)          # (B, T, K)
+        bin_idx = torch.argmax(probs, dim=-1)      # (B, T) 0..K-1
+        depths = torch.tensor(self.choices, device=x.device)[bin_idx]  # loop count
+        return depths, probs
+
+
 # Recurrent Block (one set of weights, looped T times)
 # ---------------------------------------------------------------------------
 
@@ -330,6 +368,14 @@ class RecurrentBlock(nn.Module):
         self.rope_loop = cfg.rope_loop
         self.rope_loop_theta = cfg.rope_loop_theta
         self.rope_loop_norm = RMSNorm(cfg.dim) if cfg.rope_loop else None
+        # RA-01: token-choice router over loop-count bins
+        self.mor = cfg.mor
+        self.mor_choices = tuple(cfg.mor_choices)
+        self.mor_router = TokenDepthRouter(cfg.dim, self.mor_choices) if cfg.mor else None
+        self.last_mor_frac = None  # (K,) batch fraction per depth bin (for logging)
+        self.last_mor_balance = None  # canonical balance loss (weight 1.0)
+        self.last_mor_depth = None    # soft expected loop count (weight = mor_aux_weight)
+        self.last_mor_aux = None      # balance+depth combined (for logging)
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -337,6 +383,46 @@ class RecurrentBlock(nn.Module):
         step (Parcae per-sequence depth sampling). Sequence b updates only while t < seq_depths[b]."""
         n_loops = n_loops or self.cfg.max_loop_iters
         B, T, D = h.shape
+
+        # RA-01: token-choice MoR routing. When enabled, the router commits each
+        # token to a loop-count (from mor_choices); that per-token depth drives
+        # the active mask and REPLACES ACT halting as the depth source (ACT and
+        # MoR are both adaptive token-loop-depth mechanisms — running both would
+        # be a double-adaptivity conflict on the same code path).
+        use_mor = self.mor and self.mor_router is not None
+        if use_mor:
+            depths, mor_probs = self.mor_router(e)          # (B,T) long, (B,T,K)
+            K = self.mor_router.max_depths
+            flat = depths.view(-1)
+            counts = torch.zeros(K, device=h.device)
+            for k in range(K):
+                counts[k] = (flat == int(self.mor_choices[k])).float().sum()
+            f_hard = counts / flat.numel()                  # (K,) hard fraction (non-diff)
+            P_soft = mor_probs.mean(dim=(0, 1))             # (K,) soft mean prob (DIFFERENTIABLE)
+            # Switch-Transformer load-balancing loss: K * sum_k f_k * P_k.
+            # Hard f_k is the target; gradient flows through soft P_k to the
+            # router, breaking the all-shallow argmax tie (the plan's collapse
+            # mitigation, made differentiable so it actually backprops).
+            L_balance = K * (f_hard * P_soft).sum()
+            # Plan's aux_depth_loss_weight: penalize high AVERAGE depth (soft
+            # expected loop count, differentiable through P_soft).
+            choices_t = torch.tensor(self.mor_choices, device=h.device, dtype=P_soft.dtype)
+            L_depth = (P_soft * choices_t).sum()
+            # RA-01: split losses so the depth-penalty weight is applied ONCE
+            # (in NanoMythos.forward) and the balance term (canon, weight 1.0)
+            # is not double-scaled by mor_aux_weight.
+            self.last_mor_balance = L_balance      # (K,) scaled to ~1 at uniform
+            self.last_mor_depth = L_depth          # soft expected loop count
+            self.last_mor_aux = L_balance          # kept for logging
+            self.last_mor_frac = f_hard
+        else:
+            depths = None
+            mor_probs = None
+
+        if use_mor:
+            still_running = depths > 0  # all tokens active at t=0
+        else:
+            still_running = torch.ones(B, T, device=h.device, dtype=torch.bool)
 
         if seq_depths is not None:
             seq_depths = seq_depths.to(device=h.device, dtype=torch.long)
@@ -346,11 +432,17 @@ class RecurrentBlock(nn.Module):
         halted = torch.zeros(B, T, device=h.device, dtype=torch.bool)
         cumulative_p = torch.zeros(B, T, device=h.device)
         h_out = torch.zeros_like(h)
-        loops_used_sum = 0  # track average loop iterations for ACT metrics
+        loops_used_sum = 0  # track average loop iterations (ACT / MoR)
 
         for t in range(n_loops):
-            # A position runs this iteration only if not halted AND its sequence hasn't hit its depth
-            still_running = ~halted & (seq_depths > t).unsqueeze(-1)  # (B, T)
+            if not still_running.any():
+                break
+            # Baseline (ACT) branch: a position runs this iteration only if not
+            # halted AND its sequence hasn't hit its sampled depth. MoR branch
+            # keeps its own per-token still_running (depths > t), so don't
+            # overwrite it with the per-sequence Parcae mask.
+            if not use_mor:
+                still_running = ~halted & (seq_depths > t).unsqueeze(-1)  # (B, T)
             if self.rope_loop:
                 # RA-08: full-dim 2D complex RoPE rotation by loop index t,
                 # then RMSNorm (plan's failure mitigation for norm disruption).
@@ -362,36 +454,49 @@ class RecurrentBlock(nn.Module):
             trans_out = trans_out + self.lora(trans_out, t)
             h = self.injection(h, e, trans_out)
 
-            p = self.act(h)  # (B, T)
+            if use_mor:
+                # RA-01 token-choice: a token's final active loop is t where
+                # depths == t+1. Its h_out is simply its state at that loop
+                # (MoR has no ACT weighted-sum / depth-completion terms).
+                finish_t = (depths == (t + 1)) & still_running  # (B,T)
+                if finish_t.any():
+                    h_out = torch.where(finish_t.unsqueeze(-1), h, h_out)
+                # Token is active on iteration t while t < its depth.
+                loops_used_sum += still_running.float().sum().item()
+                still_running = depths > (t + 1)
+                if not still_running.any():
+                    break
+            else:
+                p = self.act(h)  # (B, T)
 
-            # ACT remainder trick (only for sequences still running)
-            remainder = (1.0 - cumulative_p).clamp(min=0)
-            weight = torch.where(
-                cumulative_p + p >= self.cfg.act_threshold,
-                remainder,
-                p,
-            )
-            weight = weight * still_running.float()
-            h_out = h_out + weight.unsqueeze(-1) * h
+                # ACT remainder trick (only for sequences still running)
+                remainder = (1.0 - cumulative_p).clamp(min=0)
+                weight = torch.where(
+                    cumulative_p + p >= self.cfg.act_threshold,
+                    remainder,
+                    p,
+                )
+                weight = weight * still_running.float()
+                h_out = h_out + weight.unsqueeze(-1) * h
 
-            cumulative_p = cumulative_p + p * still_running.float()
-            halted = halted | (cumulative_p >= self.cfg.act_threshold)
+                cumulative_p = cumulative_p + p * still_running.float()
+                halted = halted | (cumulative_p >= self.cfg.act_threshold)
 
-            # RA-06 depth-completion term: a sequence reaching its sampled depth
-            # before ACT-halting must still contribute its remaining probability to
-            # h_out (the ACT trick sums to 1 only across the FULL depth). Without
-            # this, short-depth sequences would emit ~zero output.
-            finished_at_t = (seq_depths == (t + 1)).unsqueeze(-1) & still_running
-            if finished_at_t.any():
-                completion_mask = finished_at_t & ~halted  # exclude ACT-halted (already full-remainder)
-                completion_weight = ((1.0 - cumulative_p).clamp(min=0)) * completion_mask.float()
-                h_out = h_out + completion_weight.unsqueeze(-1) * h
+                # RA-06 depth-completion term: a sequence reaching its sampled
+                # depth before ACT-halting must still contribute its remaining
+                # probability to h_out (the ACT trick sums to 1 only across the
+                # FULL depth). Without this, short-depth sequences emit ~zero.
+                finished_at_t = (seq_depths == (t + 1)).unsqueeze(-1) & still_running
+                if finished_at_t.any():
+                    completion_mask = finished_at_t & ~halted  # exclude ACT-halted
+                    completion_weight = ((1.0 - cumulative_p).clamp(min=0)) * completion_mask.float()
+                    h_out = h_out + completion_weight.unsqueeze(-1) * h
 
-            # Track how many positions used this loop iteration
-            loops_used_sum += still_running.float().sum().item()
+                # Track how many positions used this loop iteration
+                loops_used_sum += still_running.float().sum().item()
 
-            if not (~halted & (seq_depths > (t + 1)).unsqueeze(-1)).any():
-                break
+                if not (~halted & (seq_depths > (t + 1)).unsqueeze(-1)).any():
+                    break
 
         # ACT stats
         total_positions = B * T
@@ -478,6 +583,13 @@ class NanoMythos(nn.Module):
                 ignore_index=-1,
                 reduction=reduction,
             )
+            # RA-01: add the router aux loss (load-balance + high-depth penalty).
+            # Weighted inside the compiled graph so it backprops to the router;
+            # training-only so eval/val_bpb stays comparable across configs.
+            _bal = getattr(self.recurrent, "last_mor_balance", None)
+            _dep = getattr(self.recurrent, "last_mor_depth", None)
+            if self.cfg.mor and self.training and _bal is not None and reduction == "mean":
+                loss = loss + _bal + self.cfg.mor_aux_weight * _dep
             return loss
         return logits
 
@@ -547,6 +659,16 @@ PARCAE_DEPTH_SAMPLE = _env_bool("NANO_PARCAE_DEPTH_SAMPLE", True)
 PARCAE_INIT = _env_bool("NANO_PARCAE_INIT", True)  # raise rho(A) init to ~0.95 (Parcae band top)
 ROPE_LOOP = _env_bool("NANO_ROPE_LOOP", False)  # RA-08: RoPE loop-index rotation
 ROPE_LOOP_THETA = _env_float("NANO_ROPE_LOOP_THETA", 10000.0)
+# RA-01: Mixture-of-Recursions (token-choice routing)
+MOR = _env_bool("NANO_MOR", False)
+# Loop-count bins the router chooses from; scaled to max_loop_iters. The plan's
+# [4,8,12,16] assumes T=16; at the baseline T=8 the proportional set is (1,2,4,8).
+_MOR_CHOICES_RAW = os.environ.get("NANO_MOR_CHOICES", "1,2,4,8")
+MOR_CHOICES = tuple(int(v) for v in _MOR_CHOICES_RAW.split(",") if v.strip())
+# Clamp so no choice exceeds max_loop_iters (routing to >max loops would be a no-op).
+MOR_CHOICES = tuple(min(c, MAX_LOOP_ITERS) for c in MOR_CHOICES) or (MAX_LOOP_ITERS,)
+MOR_AUX_WEIGHT = _env_float("NANO_MOR_AUX_WEIGHT", 0.01)
+MOR_BAL_WEIGHT = _env_float("NANO_MOR_BAL_WEIGHT", 1.0)  # canonical balance term weight
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -557,7 +679,8 @@ if MAX_STEPS > 0:
 print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"time={TIME_BUDGET}s eval_every={EVAL_EVERY_N_STEPS} lr={LEARNING_RATE} "
       f"loops={MAX_LOOP_ITERS} e_norm={PARCAE_E_NORM} depth_sample={PARCAE_DEPTH_SAMPLE} "
-      f"rope_loop={ROPE_LOOP} rope_theta={ROPE_LOOP_THETA} tag={CKPT_TAG}")
+      f"rope_loop={ROPE_LOOP} rope_theta={ROPE_LOOP_THETA} "
+      f"mor={MOR} mor_choices={MOR_CHOICES} mor_aux_w={MOR_AUX_WEIGHT} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +718,9 @@ cfg = NanoMythosConfig(
     parcae_depth_sample=PARCAE_DEPTH_SAMPLE,
     rope_loop=ROPE_LOOP,
     rope_loop_theta=ROPE_LOOP_THETA,
+    mor=MOR,
+    mor_choices=MOR_CHOICES,
+    mor_aux_weight=MOR_AUX_WEIGHT,
 )
 
 with torch.device("meta"):
@@ -741,14 +867,25 @@ while True:
     avg_loops = getattr(model.recurrent, 'last_avg_loops', cfg.max_loop_iters)
     avg_depth = getattr(model.recurrent, 'last_avg_depth', cfg.max_loop_iters)
     # RA-06: log spectral radius rho(A) of the LTI injection matrix.
-    _lti = model.recurrent.injection if hasattr(model.recurrent, 'injection') else None
-    rho_A = _lti.spectral_radius() if (_lti is not None and hasattr(_lti, 'spectral_radius')) else float('nan')
+    _lti = model.recurrent.injection if hasattr(model.recurrent, "injection") else None
+    rho_A = _lti.spectral_radius() if (_lti is not None and hasattr(_lti, "spectral_radius")) else float("nan")
+    # RA-01: router depth-bin distribution (frac of tokens per choice).
+    _mor_frac = getattr(model.recurrent, "last_mor_frac", None)
+    _mor_str = ""
+    if cfg.mor and _mor_frac is not None:
+        _ch = cfg.mor_choices
+        _parts = ",".join(f"{int(_ch[k])}:{_mor_frac[k].item():.2f}" for k in range(len(_ch)))
+        _bal = getattr(model.recurrent, "last_mor_balance", None)
+        _dep = getattr(model.recurrent, "last_mor_depth", None)
+        _auxlog = (f"bal:{_bal.item():.3f} dep:{_dep.item():.2f}"
+                  if _bal is not None and _dep is not None else "n/a")
+        _mor_str = f" | mor[{_parts}] {_auxlog}"
 
     print(
         f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lr: {lr:.6f} | "
         f"dt: {dt*1000:.0f}ms | tok/s: {tok_per_sec:,} | mfu: {mfu:.1f}% | "
         f"avg_loops: {avg_loops:.1f}/{cfg.max_loop_iters} | avg_depth: {avg_depth:.1f} | rhoA: {rho_A:.3f} | "
-        f"epoch: {epoch} | remaining: {remaining:.0f}s",
+        f"epoch: {epoch}{_mor_str} | remaining: {remaining:.0f}s",
         end="",
         flush=True,
     )
