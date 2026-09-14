@@ -70,6 +70,10 @@ class NanoMythosConfig:
     mor_choices: tuple = (1, 2, 4, 8)  # loop-count per routing bin (scaled to max_loop_iters)
     mor_aux_weight: float = 0.01     # weight for the high-depth penalty term
     mor_bal_weight: float = 0.01     # weight for the load-balance term
+    # --- RA-04: Mixture-of-Depths (capacity-constrained token bypass per loop) ---
+    mod: bool = False                # route only top-P% tokens through block per loop
+    mod_capacity: float = 0.5        # P: fraction of positions processed per loop
+    mod_noise: float = 0.1           # router score noise during training (plan mitigation)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +345,22 @@ class TokenDepthRouter(nn.Module):
         return depths, probs
 
 
+# RA-04 MoD capacity router (plan: open_mythos/mod_router.py MoDRouter).
+# Per-token importance score in (0,1); per loop the top-k positions by score
+# run the Attention/FFN block while the rest bypass via residual. Router
+# gradient via Raposo et al. score-scaling (block out *= score); degeneracy
+# mitigation is training-time score noise (plan's Automated Failure Mitigation).
+class MoDRouter(nn.Module):
+    """Capacity router: per-token importance score for top-k selection."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.score = nn.Linear(dim, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, T, dim) -> scores (B, T) in (0, 1)."""
+        return torch.sigmoid(self.score(x)).squeeze(-1)
+
+
 # Recurrent Block (one set of weights, looped T times)
 # ---------------------------------------------------------------------------
 
@@ -376,6 +396,13 @@ class RecurrentBlock(nn.Module):
         self.last_mor_balance = None  # canonical balance loss (weight 1.0)
         self.last_mor_depth = None    # soft expected loop count (weight = mor_aux_weight)
         self.last_mor_aux = None      # balance+depth combined (for logging)
+        # RA-04: capacity router for per-loop token bypass
+        self.mod = cfg.mod
+        self.mod_capacity = float(cfg.mod_capacity)
+        self.mod_noise = float(cfg.mod_noise)
+        self.mod_router = MoDRouter(cfg.dim) if cfg.mod else None
+        self.last_mod_frac = None     # actual processed fraction (for logging)
+        self.last_mod_score = None    # mean router score (for logging)
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -450,9 +477,41 @@ class RecurrentBlock(nn.Module):
             else:
                 h_loop = loop_index_embedding(h, t, self.loop_dim)
             combined = self.norm(h_loop + e)
-            trans_out = self.block(combined, freqs_cis, mask)
-            trans_out = trans_out + self.lora(trans_out, t)
-            h = self.injection(h, e, trans_out)
+            if self.mod and self.mod_router is not None and T > 1:
+                # RA-04 MoD: shared top-k positions for this loop (batch-shared
+                # selection by mean score keeps the RoPE freqs broadcast correct;
+                # at eval B=1 it is exactly per-sequence top-k). Sorted ascending
+                # to preserve causal order in the gathered subsequence.
+                scores = self.mod_router(combined)  # (B,T)
+                if self.training and self.mod_noise > 0:
+                    scores = (scores + torch.randn_like(scores) * self.mod_noise).clamp(0, 1)
+                k = max(1, int(T * self.mod_capacity))
+                _, topk_idx = torch.topk(scores.mean(dim=0), k=k)  # (k,)
+                topk_idx, _ = torch.sort(topk_idx)
+                x_topk = combined[:, topk_idx, :]      # (B,k,D)
+                freqs_topk = freqs_cis[topk_idx]       # (k,F)
+                if mask is not None:
+                    mask_k = torch.full((1, 1, k, k), float("-inf"),
+                                        device=h.device, dtype=combined.dtype).triu(1)
+                else:
+                    mask_k = None
+                blk = self.block(x_topk, freqs_topk, mask_k)
+                blk = blk + self.lora(blk, t)
+                # Raposo et al.: scale by router confidence -> gradient to router.
+                blk = blk * scores[:, topk_idx].unsqueeze(-1)
+                trans_full = torch.zeros_like(combined)
+                trans_full[:, topk_idx, :] = blk
+                h_new = self.injection(h, e, trans_full)
+                # Plan: bypassed tokens keep input value (direct residual).
+                sel = torch.zeros(B, T, device=h.device, dtype=torch.bool)
+                sel[:, topk_idx] = True
+                h = torch.where(sel.unsqueeze(-1), h_new, h)
+                self.last_mod_frac = k / T
+                self.last_mod_score = float(scores.detach().mean().item())
+            else:
+                trans_out = self.block(combined, freqs_cis, mask)
+                trans_out = trans_out + self.lora(trans_out, t)
+                h = self.injection(h, e, trans_out)
 
             if use_mor:
                 # RA-01 token-choice: a token's final active loop is t where
@@ -669,6 +728,10 @@ MOR_CHOICES = tuple(int(v) for v in _MOR_CHOICES_RAW.split(",") if v.strip())
 MOR_CHOICES = tuple(min(c, MAX_LOOP_ITERS) for c in MOR_CHOICES) or (MAX_LOOP_ITERS,)
 MOR_AUX_WEIGHT = _env_float("NANO_MOR_AUX_WEIGHT", 0.01)
 MOR_BAL_WEIGHT = _env_float("NANO_MOR_BAL_WEIGHT", 1.0)  # canonical balance term weight
+# RA-04: Mixture-of-Depths (capacity-constrained token bypass per loop)
+MOD = _env_bool("NANO_MOD", False)
+MOD_CAPACITY = _env_float("NANO_MOD_CAPACITY", 0.5)
+MOD_NOISE = _env_float("NANO_MOD_NOISE", 0.1)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -680,7 +743,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"time={TIME_BUDGET}s eval_every={EVAL_EVERY_N_STEPS} lr={LEARNING_RATE} "
       f"loops={MAX_LOOP_ITERS} e_norm={PARCAE_E_NORM} depth_sample={PARCAE_DEPTH_SAMPLE} "
       f"rope_loop={ROPE_LOOP} rope_theta={ROPE_LOOP_THETA} "
-      f"mor={MOR} mor_choices={MOR_CHOICES} mor_aux_w={MOR_AUX_WEIGHT} tag={CKPT_TAG}")
+      f"mor={MOR} mor_choices={MOR_CHOICES} mor_aux_w={MOR_AUX_WEIGHT} "
+      f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +785,9 @@ cfg = NanoMythosConfig(
     mor=MOR,
     mor_choices=MOR_CHOICES,
     mor_aux_weight=MOR_AUX_WEIGHT,
+    mod=MOD,
+    mod_capacity=MOD_CAPACITY,
+    mod_noise=MOD_NOISE,
 )
 
 with torch.device("meta"):
@@ -880,12 +947,18 @@ while True:
         _auxlog = (f"bal:{_bal.item():.3f} dep:{_dep.item():.2f}"
                   if _bal is not None and _dep is not None else "n/a")
         _mor_str = f" | mor[{_parts}] {_auxlog}"
+    # RA-04: MoD processed fraction + mean router score.
+    _mod_frac = getattr(model.recurrent, "last_mod_frac", None)
+    _mod_str = ""
+    if cfg.mod and _mod_frac is not None:
+        _msc = getattr(model.recurrent, "last_mod_score", None)
+        _mod_str = f" | mod[{_mod_frac:.2f} s:{_msc:.3f}]" if _msc is not None else f" | mod[{_mod_frac:.2f}]"
 
     print(
         f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lr: {lr:.6f} | "
         f"dt: {dt*1000:.0f}ms | tok/s: {tok_per_sec:,} | mfu: {mfu:.1f}% | "
         f"avg_loops: {avg_loops:.1f}/{cfg.max_loop_iters} | avg_depth: {avg_depth:.1f} | rhoA: {rho_A:.3f} | "
-        f"epoch: {epoch}{_mor_str} | remaining: {remaining:.0f}s",
+        f"epoch: {epoch}{_mor_str}{_mod_str} | remaining: {remaining:.0f}s",
         end="",
         flush=True,
     )
