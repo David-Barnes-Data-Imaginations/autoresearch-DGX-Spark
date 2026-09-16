@@ -52,3 +52,12 @@ Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status,
 2026-09-14, ra04_R1_mod05_1200,  2.304970, 1200, 0.957, 2.0, 895.6, early-win, MoD cap 0.5 @T=8 — beats R0 by 0.0020 bpb; late-reversal signature (+0.0012@150 -> -0.0020@900..1200); train 272.2s (-19%), VRAM -18%; router score stuck ~0.5 (noise-driven bypass, block robust to 50% skip)
 2026-09-14, ra04_R2_mod05_T16,   2.304970, 1200, 0.957, 2.0, 895.5, ADOPTED-WIN, MoD cap 0.5 @T=16 — EXACT replication of R1 (2.304970); ACT halts ~2 loops so loops 9-16 never run; plan T=16 prescription neutered by ACT halting; train 245.1s
 2026-09-14, ra04_CONCLUSION,     n/a, -, -, -, -, ADOPTED, RA-04 complete-adopted-with-wins. MoD-0.5 beats full-compute baseline by 0.0020 bpb (R1+R2), -19% train time, -18% VRAM. Adopted NANO_MOD=1/cap 0.5 into baseline (env-carried). Baseline now 2.304970@1200. Next: RA-11.
+================================================================
+RA-11 Recycled KV Memory — Nano-Mythos validation (2026-09-16)
+================================================================
+Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status, description
+
+2026-09-16, ra11_SMOKE,            3.215282, 60, 0.950, 2.0, 895.5, smoke-pass, MoD-0.5 + recycle-alpha0.7-dynamic 60 steps — no crash, loss descends 9.0109->9.0101, eval works, rhoA pinned 0.950, ~165K tok/s
+2026-09-16, ra11_R0_baseline1200,  2.304970, 1200, 0.957, 2.05, 895.6, reference, MoD-0.5 baseline (Parcae+RoPE+MoD-0.5, recycle OFF) — reproduces RA-04 adopted reference 2.304970 EXACTLY; confirms recycle-gated patch bit-consistent; train 266.1s
+2026-09-16, ra11_R1_recycle1200,   2.304971, 1200, 0.957, 2.05, 895.6, neutral, recycle alpha 0.7 dynamic-schedule ON — Delta+1e-6 vs R0 (noise); 7/8 eval checkpoints bit-identical (150-1050 all match, 900/1200 +1e-6); train 246.3s (-7.4% single-sample), VRAM identical
+2026-09-16, ra11_CONCLUSION,       n/a, -, -, -, -, NEUTRAL, RA-11 complete-neutral (not adopted). Recycled-KV EMA is quality-neutral by construction (fresh W_K/W_V still computed every loop; blend only smooths); plan headline criteria (2.5x decode speedup, -60% BW) need a decode harness that does not exist in this repo — noted as future work. Baseline unchanged (2.304970@1200). Next: RA-03 LT2.

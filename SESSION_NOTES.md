@@ -17,7 +17,7 @@
 | **RA-08** | **RoPE Loop-Index Embedding** | **completed (adopted-with-wins)** | **5** | **0 (win)** | val_bpb 2.306980 @1200 (beats full-Parcae baseline 2.314457 by 0.0075; gap compounds 800->1200) | **YES — NANO_ROPE_LOOP=1 adopted into baseline** |
 | RA-09 | Dynamic ACT Ponder Loss | not-started | 0 | 0 | — | — |
 | RA-10 | Continuous Latent Beam Search | not-started | 0 | 0 | — | — |
-| RA-11 | Recycled KV Memory | not-started | 0 | 0 | — | — |
+| RA-11 | Recycled KV Memory | completed (neutral) | 2 (R0,R1) | 1 (precise null) | R1 recycle-a0.7-dyn: val_bpb 2.304971@1200 (Delta+1e-6 vs R0 2.304970; 7/8 eval ckpts bit-identical) | NO — quality-neutral by construction; baseline unchanged |
 | RA-12 | Nanbeige 3B Compact MoE | not-started | 0 | 0 | — | — |
 
 ---
@@ -985,3 +985,122 @@ possible RA-09 dynamic-ponder interaction).
 - logs/ra04_{R0_baseline1200,R1_mod05_1200,R2_mod05_T16_1200}.log.
 - checkpoints/nano_mythos_ra04_{R0,R1,R2}_*.pt.
 - results.tsv — RA-04 block appended.
+
+## Session Date: 2026-09-16 — RA-11 Recycled KV Memory (Avenue 3)
+================================================================
+
+### Setup
+Phase A next avenue after RA-04 (adopted). Baseline = full Parcae (RA-06) +
+RoPE loop-index (RA-08) + MoD cap-0.5 (RA-04), ref val_bpb 2.304970 @1200.
+MoR NOT carried (neutral). Per plan order Phase 2 (RA-01, RA-04 done) -> RA-11,
+then Phase 3: RA-03, RA-05, RA-02.
+
+### Paper note
+The plan cites *The Recurrent Transformer* arXiv:2604.21215 (forward-dated
+placeholder link — local PDF
+`docs/research_plan/papers/The Recurrent Transformer Greater Effective Depth
+and Efficient Decoding.pdf` is the authoritative reference). The plan's
+Implementation Logic (EMA blend K_t = a*K_{t-1} + (1-a)*W_K h_t, alpha 0.7,
+dynamic schedule a(t) = a_max*(1-e^{-t/2})) was implemented exactly as
+specified. NOTE: as specified, fresh W_K/W_V projections are still computed
+every loop — the blend only smooths, it does not skip compute. The paper's
+2.5x/60% headline figures come from autoregressive DECODING setups (cache
+reuse across sequence steps), not from loop-step training. There is no decode
+benchmark harness in this repo, so only the perplexity-delta criterion
+(<= +0.01) is measurable here, plus train-time/VRAM proxies.
+
+### Implementation (training/nano_mythos_train.py, env-gated NANO_KV_RECYCLE)
+Found substantially complete in the working tree uncommitted (prior session's
+in-progress work); verified line-by-line against the plan before running:
+- `GQAttention.forward_recycled_kv` — fresh q/new_k/new_v, RoPE, then EMA
+  blend post-RoPE/pre-GQA-expansion; caches returned detached (truncated BPTT,
+  wk/wv keep gradients via the (1-a) fresh term each loop). Matches plan code.
+- `TransformerBlock.forward_recycled` — attention via recycled path, FFN dense.
+- `RecurrentBlock` — per-forward caches reset each forward, EMA across loops;
+  dynamic schedule a(t) (plan mitigation, default ON); `last_kv_alpha` logging.
+- MoD interaction (flagged last session): top-k positions blend with their
+  cached K/V; bypassed positions keep the STALE cache (that IS the recycle
+  mechanism); full cache seeded loop-0 under no_grad so bypassed tokens have
+  valid K/V. Documented in code.
+- Env: NANO_KV_RECYCLE / NANO_KV_ALPHA (0.7) / NANO_KV_DYNAMIC (default True).
+- Conflict check: recycle touches K/V content per loop; ACT controls loop
+  DEPTH; MoD gates block COMPUTE; RoPE rotates phase; Parcae stabilizes. No
+  same-code-path conflict — full baseline carried (MoD ON in both arms).
+
+### Smoke test (60 steps, MoD-0.5 + recycle-a0.7-dyn ON, venv)
+No crash, loss descends 9.0109->9.0101, eval works (3.215815@30,
+3.215282@60), rhoA pinned 0.950, mod[0.50] logged, ~165K tok/s, 895.5MB VRAM.
+PASS. (No training/smoke_test_train.py in repo — smoke done via
+NANO_MAX_STEPS=60 env override, per established RA-04 pattern.)
+
+### 1200-step matched pair R0/R1 (mb=8, ga=8, seq=512, lr=3e-4, cosine to 0, venv)
+R0 = recycle-off baseline (Parcae+RoPE+MoD-0.5); R1 = +recycle alpha 0.7
+dynamic. Same seed/data/config otherwise. Runner: run_ra11_exp.sh (repo root,
+archived on completion).
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | **1200 final** |
+|------|-----|-----|-----|-----|-----|-----|------|----------------|
+| R0 (off) | 3.133374 | 2.821845 | 2.601110 | 2.458002 | 2.369891 | 2.324311 | 2.307420 | **2.304970** |
+| R1 (on) | 3.133374 | 2.821845 | 2.601110 | 2.458002 | 2.369891 | 2.324312 | 2.307420 | **2.304971** |
+| Δ | 0 | 0 | 0 | 0 | 0 | +1e-6 | 0 | **+1e-6** |
+
+R0 reproduces the adopted reference EXACTLY (2.304970) — the recycle-gated
+patch is bit-consistent on the recycle-off path. R1 is a precise null: 7/8
+eval checkpoints bit-identical, max |Delta| 1e-6 (noise floor).
+Engagement verified (not a dead path): per-step train_loss diverges from
+~step 71 at 1e-6 level and grows (7.304179 vs 7.304182 @450); early dynamic
+alphas are small (a(0)=0, a(1)=0.28), so the effect starts tiny and stays
+tiny — the EMA is a mild smoother, representational content preserved.
+Training wall-clock: R1 246.3s vs R0 266.1s (-7.4%, SINGLE SAMPLE — likely
+detached-cache autograd savings, not the intended mechanism; not claimed as
+a win). Peak VRAM: identical 895.6MB. rhoA 0.957 both, zero loss spikes,
+avg_loops 2.05/8 both.
+
+### Decision: RA-11 COMPLETE — neutral (not adopted)
+- Validation criteria: perplexity delta +0.000001, far inside the plan's
+  <= +0.01 budget — quality criterion MET, but as a null, not a win. The
+  2.5x inference-speedup / -60% BW criteria are NOT measurable in the
+  training harness (no decode benchmark; implementation still projects fresh
+  K/V every loop) — recorded as future work, not a failure.
+- 5-strike: 1 consecutive non-improving (R1). Early close justified per RA-01
+  precedent (RA-01 closed at 3 with principled rationale): the null is
+  bit-exact across all 8 checkpoints, and the mechanism is quality-neutral BY
+  CONSTRUCTION (smoothing, no capacity/compute change in-harness) — further
+  alpha variants cannot plausibly produce a training win.
+- Baseline unchanged: **val_bpb 2.304970 @1200** (Parcae + RoPE + MoD-0.5).
+  Recycle NOT carried (neutral mechanisms stay out, same as MoR) — avoids the
+  extra MoD-stale-KV interaction surface for zero training gain. If a decode
+  harness is ever built, recycle can be re-evaluated there where its payoff
+  lives (KV-cache reuse across sequence steps).
+- Open thread (not avenue-blocking): R1's -7.4% train-time delta is one
+  sample; a repeated-timing microbenchmark could confirm/deny, but it does
+  not affect the adoption decision (identical VRAM, null quality).
+
+### Next session
+1. Start **RA-03 (LT2 Hybrid Attention)** per the plan's order (Phase 3:
+   RA-03, RA-05, RA-02). Paper: `docs/research_plan/papers/LT2
+   Linear-Time Looped Transformers.pdf` (verify title — RA-03 is
+   linear-time/subquadratic attention; check plan text).
+2. Baseline MUST include full Parcae + RoPE + MoD-0.5 (NANO_MOD=1,
+   NANO_MOD_CAPACITY=0.5). Check conflicts: LT2 replaces attention math
+   (linear state) — recycle is OFF (neutral, not carried) so no K/V-cache
+   interaction; MoD top-k + linear-state interaction needs a note (bypassed
+   tokens' linear state goes stale — same class of issue as RA-11's, plan
+   the seeding/exclusion up front).
+3. Venv route proven again (smoke + 2/2 runs clean).
+   TRITON_CACHE_DIR=/tmp/triton_cache_ra11 worked; use a fresh
+   /tmp/triton_cache_ra03 next avenue.
+
+### Artifacts
+- training/nano_mythos_train.py — RA-11 recycle implementation
+  (NANO_KV_RECYCLE-gated; committed but default OFF).
+- run_ra11_exp.sh (R0+R1 matched pair) — repo root while in use, moved to
+  scripts/archive/ on completion.
+- logs/ra11_{R0_baseline1200,R1_recycle1200}.log.
+  (R0/R1 eval tables in full above; smoke output in R1-prior terminal.)
+- checkpoints/nano_mythos_ra11_{R0_baseline1200,R1_recycle1200,SMOKE}.pt.
+- results.tsv — RA-11 block appended.
+
+### Phase B status
+Phase B QUEUED — Phase A still has unfinished avenues (RA-03, RA-05, RA-02,
+RA-07, RA-09, RA-10, RA-12). Do not touch TTT avenues early.

@@ -74,6 +74,10 @@ class NanoMythosConfig:
     mod: bool = False                # route only top-P% tokens through block per loop
     mod_capacity: float = 0.5        # P: fraction of positions processed per loop
     mod_noise: float = 0.1           # router score noise during training (plan mitigation)
+    # --- RA-11: Recycled KV Memory (exponential moving average over loops) ---
+    kv_recycle: bool = False         # reuse K/V across loops via EMA (plan Sec RA-11)
+    kv_alpha: float = 0.7            # EMA weight on previous-loop K/V (plan default)
+    kv_dynamic: bool = True          # dynamic schedule alpha(t)=amax*(1-exp(-t/2)) (plan fix)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +163,45 @@ class GQAttention(nn.Module):
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.wo(out)
 
+    def forward_recycled_kv(self, x, freqs_cis, mask=None, prev_k=None, prev_v=None, alpha=0.7):
+        """RA-11: KV Memory Recycling (plan Sec RA-11).
+
+        K_t = alpha * K_{t-1} + (1-alpha) * W_K h_t (same for V), blended
+        post-RoPE / pre-GQA-expansion. Caches are detached (truncated BPTT
+        through the cache would unroll the loop graph twice -> OOM risk);
+        wk/wv still get gradients via the (1-alpha) fresh term each loop.
+        """
+        B, T, _ = x.shape
+        q = self.wq(x).view(B, T, self.n_heads, self.head_dim)
+        new_k = self.wk(x).view(B, T, self.n_kv_heads, self.head_dim)
+        new_v = self.wv(x).view(B, T, self.n_kv_heads, self.head_dim)
+
+        q = apply_rope(q, freqs_cis)
+        new_k = apply_rope(new_k, freqs_cis)
+
+        if prev_k is not None and prev_v is not None and alpha is not None:
+            k_blend = alpha * prev_k.to(new_k.dtype) + (1.0 - alpha) * new_k
+            v_blend = alpha * prev_v.to(new_v.dtype) + (1.0 - alpha) * new_v
+        else:
+            k_blend, v_blend = new_k, new_v
+
+        # Expand KV heads for GQA
+        k = k_blend.repeat_interleave(self.groups, dim=2)
+        v = v_blend.repeat_interleave(self.groups, dim=2)
+
+        q = q.transpose(1, 2)  # (B, H, T, head_dim)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        scale = self.head_dim ** -0.5
+        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+        if mask is not None:
+            attn = attn + mask
+        attn = F.dropout(F.softmax(attn, dim=-1), p=self.dropout_p, training=self.training)
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        return self.wo(out), k_blend.detach(), v_blend.detach()
+
 
 # ---------------------------------------------------------------------------
 # SwiGLU FFN (dense, no MoE for small model)
@@ -194,6 +237,14 @@ class TransformerBlock(nn.Module):
         x = x + self.resid_drop(self.attn(self.attn_norm(x), freqs_cis, mask))
         x = x + self.resid_drop(self.ffn(self.ffn_norm(x)))
         return x
+
+    def forward_recycled(self, x, freqs_cis, mask=None, prev_k=None, prev_v=None, alpha=0.7):
+        """RA-11: same as forward but attention recycles K/V across loops."""
+        a_out, k_new, v_new = self.attn.forward_recycled_kv(
+            self.attn_norm(x), freqs_cis, mask, prev_k, prev_v, alpha)
+        x = x + self.resid_drop(a_out)
+        x = x + self.resid_drop(self.ffn(self.ffn_norm(x)))
+        return x, k_new, v_new
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +454,11 @@ class RecurrentBlock(nn.Module):
         self.mod_router = MoDRouter(cfg.dim) if cfg.mod else None
         self.last_mod_frac = None     # actual processed fraction (for logging)
         self.last_mod_score = None    # mean router score (for logging)
+        # RA-11: recycled KV caches across loops (EMA over loop steps)
+        self.kv_recycle = cfg.kv_recycle
+        self.kv_alpha = float(cfg.kv_alpha)
+        self.kv_dynamic = bool(cfg.kv_dynamic)
+        self.last_kv_alpha = None     # alpha(t) used at last loop (for logging)
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -460,6 +516,10 @@ class RecurrentBlock(nn.Module):
         cumulative_p = torch.zeros(B, T, device=h.device)
         h_out = torch.zeros_like(h)
         loops_used_sum = 0  # track average loop iterations (ACT / MoR)
+        # RA-11: per-forward KV caches (reset each forward; EMA across loops t)
+        prev_k = None
+        prev_v = None
+        self.last_kv_alpha = None
 
         for t in range(n_loops):
             if not still_running.any():
@@ -495,7 +555,28 @@ class RecurrentBlock(nn.Module):
                                         device=h.device, dtype=combined.dtype).triu(1)
                 else:
                     mask_k = None
-                blk = self.block(x_topk, freqs_topk, mask_k)
+                if self.kv_recycle:
+                    # RA-11 + MoD interaction: top-k positions blend with their
+                    # cached K/V (alpha schedule); bypassed positions keep the
+                    # stale cache (that IS the recycle mechanism). Seed the
+                    # full cache on loop 0 so bypassed tokens have valid K/V.
+                    alpha_t = self.kv_alpha * (1.0 - math.exp(-t / 2.0)) if self.kv_dynamic else self.kv_alpha
+                    self.last_kv_alpha = float(alpha_t)
+                    if prev_k is None:
+                        with torch.no_grad():
+                            seed_k = apply_rope(self.block.attn.wk(combined).view(B, T, self.block.attn.n_kv_heads, self.block.attn.head_dim), freqs_cis)
+                            seed_v = self.block.attn.wv(combined).view(B, T, self.block.attn.n_kv_heads, self.block.attn.head_dim)
+                        prev_k = seed_k.detach()
+                        prev_v = seed_v.detach()
+                    blk, k_topk_new, v_topk_new = self.block.forward_recycled(
+                        x_topk, freqs_topk, mask_k,
+                        prev_k[:, topk_idx, :], prev_v[:, topk_idx, :], alpha_t)
+                    prev_k = prev_k.clone()
+                    prev_v = prev_v.clone()
+                    prev_k[:, topk_idx, :] = k_topk_new
+                    prev_v[:, topk_idx, :] = v_topk_new
+                else:
+                    blk = self.block(x_topk, freqs_topk, mask_k)
                 blk = blk + self.lora(blk, t)
                 # Raposo et al.: scale by router confidence -> gradient to router.
                 blk = blk * scores[:, topk_idx].unsqueeze(-1)
@@ -509,7 +590,14 @@ class RecurrentBlock(nn.Module):
                 self.last_mod_frac = k / T
                 self.last_mod_score = float(scores.detach().mean().item())
             else:
-                trans_out = self.block(combined, freqs_cis, mask)
+                if self.kv_recycle:
+                    # RA-11: EMA-blend K/V with previous loop's cache.
+                    alpha_t = self.kv_alpha * (1.0 - math.exp(-t / 2.0)) if self.kv_dynamic else self.kv_alpha
+                    self.last_kv_alpha = float(alpha_t)
+                    trans_out, prev_k, prev_v = self.block.forward_recycled(
+                        combined, freqs_cis, mask, prev_k, prev_v, alpha_t)
+                else:
+                    trans_out = self.block(combined, freqs_cis, mask)
                 trans_out = trans_out + self.lora(trans_out, t)
                 h = self.injection(h, e, trans_out)
 
@@ -732,6 +820,10 @@ MOR_BAL_WEIGHT = _env_float("NANO_MOR_BAL_WEIGHT", 1.0)  # canonical balance ter
 MOD = _env_bool("NANO_MOD", False)
 MOD_CAPACITY = _env_float("NANO_MOD_CAPACITY", 0.5)
 MOD_NOISE = _env_float("NANO_MOD_NOISE", 0.1)
+# RA-11: Recycled KV Memory (env-gated; defaults preserve baseline)
+KV_RECYCLE = _env_bool("NANO_KV_RECYCLE", False)
+KV_ALPHA = _env_float("NANO_KV_ALPHA", 0.7)
+KV_DYNAMIC = _env_bool("NANO_KV_DYNAMIC", True)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -744,7 +836,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"loops={MAX_LOOP_ITERS} e_norm={PARCAE_E_NORM} depth_sample={PARCAE_DEPTH_SAMPLE} "
       f"rope_loop={ROPE_LOOP} rope_theta={ROPE_LOOP_THETA} "
       f"mor={MOR} mor_choices={MOR_CHOICES} mor_aux_w={MOR_AUX_WEIGHT} "
-      f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} tag={CKPT_TAG}")
+      f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} "
+      f"kv_recycle={KV_RECYCLE} kv_alpha={KV_ALPHA} kv_dynamic={KV_DYNAMIC} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +881,9 @@ cfg = NanoMythosConfig(
     mod=MOD,
     mod_capacity=MOD_CAPACITY,
     mod_noise=MOD_NOISE,
+    kv_recycle=KV_RECYCLE,
+    kv_alpha=KV_ALPHA,
+    kv_dynamic=KV_DYNAMIC,
 )
 
 with torch.device("meta"):
