@@ -15,8 +15,8 @@ This repository is now the **canonical master copy** of the project. (An earlier
 
 Frontier-model reports point at three converging directions: **fast weights / two-speed learning**, **test-time training with dynamic weight adaptation**, and **weight consolidation for continual learning** — wrapped in closed-loop verifier self-improvement. This repo tests all three, at small scale, one avenue at a time, keeping only what validates:
 
-- **Phase A — Recursive Depth Transformers** (`docs/research_plan/recursion_research_plan.md`): 12 avenues (mixture-of-recursions, Parcae LTI stability, RoPE loop-index embeddings, mixture-of-depths, latent reasoning, ACT ponder loss, …).
-- **Phase B — Fast weights, TTT & consolidation** (`docs/TTT/hermes_research_plan.md`): 12 avenues — delta-rule fast weights, Titans neural memory, Infini-attention, TTT-linear/MLP layers, in-place TTT, streaming TTT-LoRA, CLS replay, DualNet, Progress & Compress, O-LoRA, CDL-Prompt, verifier-anchored self-improvement.
+- **Phase A — Recursive Depth Transformers** (`docs/research_plan/recursion_research_plan.md`): 12 avenues (see below). In progress.
+- **Phase B — Fast weights & TTT** (`docs/TTT/hermes_research_plan.md`): 4 vetted, agent-feasible avenues (see below). Queued until Phase A completes.
 
 ## How it works
 
@@ -31,13 +31,45 @@ No 1B/1.5B scale-up runs without explicit owner approval.
 
 ## Results so far
 
-| Avenue | Result | Status |
-|--------|--------|--------|
-| RA-06 Parcae LTI stability | ρ(A) pinned 0.950, val_bpb 2.559975 @800 (baseline 2.566979) | ✅ adopted |
-| RA-08 RoPE loop-index embedding | val_bpb 2.306980 @1200 (baseline 2.314457, compounding win) | ✅ adopted |
-| RA-01 Mixture-of-Recursions | Neutral — redundant with existing ACT halting | ➖ not adopted |
+Current validation baseline: **val_bpb 2.304970 @1200 steps** (full Parcae + RoPE loop-index + MoD cap-0.5). Full history in `SESSION_NOTES.md`.
 
-Current validation baseline: **val_bpb 2.306980 @1200 steps** (full Parcae + RoPE loop-index). Full history in `SESSION_NOTES.md`.
+## Phase A avenues — Recursive Depth Transformers
+
+- **RA-01 Mixture-of-Recursions (MoR)** — routes each token through different recursion depths via expert-choice gating with selective KV caching, so easy tokens skip loop iterations.
+  Status: ✅ completed, neutral — redundant with the existing ACT per-token halting; not adopted.
+- **RA-02 Hyperloop Transformers** — replaces vector residual streams with matrix-valued states and multi-state hyper-connections, letting loop iterations share richer memory.
+  Status: ⏳ not started.
+- **RA-03 LT2 Linear-Time Looped Transformers** — hybrid subquadratic attention operating in continuous latent space, aiming for linear-time looped reasoning.
+  Status: ⏳ not started.
+- **RA-04 Mixture-of-Depths (MoD)** — capacity-constrained token bypassing per loop: only a fixed fraction (cap-0.5) of tokens take the full-depth path.
+  Status: ✅ completed, adopted — val_bpb 2.304970 @1200 plus −19% train time and −18% VRAM.
+- **RA-05 Relaxed Recursive Transformers** — layer-wise and rank-adaptive depth LoRA adapters that relax strict weight-tying across loop iterations.
+  Status: ⏳ not started.
+- **RA-06 Parcae spectral stability** — spectral-radius regularization and LTI state-space stabilization so looped weights stay contractive (ρ(A) < 1) through depth.
+  Status: ✅ completed, adopted — ρ(A) pinned at 0.950, val_bpb 2.559975 @800.
+- **RA-07 Latent reasoning & continuous-space CoT** — supervises chain-of-thought in continuous latent space to extrapolate test-time compute.
+  Status: ⏳ not started.
+- **RA-08 Loop-index positional embeddings** — RoPE-style rotary encodings over recurrence depth so shared loop weights differentiate their per-iteration roles.
+  Status: ✅ completed, adopted — val_bpb 2.306980 @1200 with a compounding late-training win.
+- **RA-09 Universal Transformer halting** — dynamic Adaptive Computation Time thresholds with ponder-loss regularization for per-token loop exit.
+  Status: ⏳ not started.
+- **RA-10 Reasoning with Latent Thoughts** — multi-trajectory continuous latent beam search, keeping several reasoning paths alive through the loop.
+  Status: ⏳ not started.
+- **RA-11 Recurrent Transformer memory** — key-value recycled memory for efficient autoregressive decoding across loop iterations.
+  Status: ⏳ not started.
+- **RA-12 Nanbeige compact agentic architecture** — fine-grained MoE expert allocation and hyperparameter calibration for small-but-agentic models.
+  Status: ⏳ not started.
+
+## Phase B avenues — Fast weights & Test-Time Training (vetted core)
+
+- **TTT-05 Infini-Attention** — segments sequences into chunks with local masked attention while compressing history into a fixed-size linear memory matrix plus normalization vector.
+  Simplest and most robust avenue; pure chunked matrix ops, no custom kernels. Queued first.
+- **TTT-01 Delta-rule fast weights** — replaces quadratic attention with an associative fast-weight matrix updated via the Widrow–Hoff delta rule, writing only residual error to avoid saturation.
+  Must use chunk-parallel recurrence — token-by-token Python loops would bottleneck Spark memory bandwidth.
+- **TTT-06 TTT-Linear recurrent layers** — reformulates recurrent state as weights of an internal linear model trained online via self-supervised reconstruction, using the parallel "dual form".
+  TTT-Linear only; TTT-MLP (multi-step non-linear autograd per chunk) is explicitly out of scope.
+- **TTT-02 Titans test-time memory** — sliding-window attention paired with a long-term associative memory modulated by gradient surprise and dynamic forgetting gates.
+  Memory restricted to a linear projection so surprise gradients stay cheap outer products; deep-MLP memory is out of scope.
 
 ## Repository layout
 
@@ -47,7 +79,8 @@ training/                  — Nano-Mythos trainers (nano_mythos_train.py, dgx_s
 open_mythos/               — architecture modules (on the Spark OpenMythos clone; mirrored here via experiments)
 docs/research_plan/        — Phase A plan + paper PDFs
 docs/TTT/                  — Phase B plan + paper summaries
-run_nano_mythos_spark.sh   — Spark Docker runner | run_raXX_*.sh — per-avenue runners
+run_nano_mythos_spark.sh   — canonical training runner | run_exp_spark.sh — sweep runner
+scripts/archive/           — retired one-off runners (reference only, do not execute)
 SESSION_NOTES.md           — append-only experiment log + progress trackers
 results.tsv                — every experiment row
 ```
