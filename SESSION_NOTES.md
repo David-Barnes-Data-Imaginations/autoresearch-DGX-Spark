@@ -9,7 +9,7 @@
 |--------|---------|--------|-----------|----------------|-------------|------------------------|
 | RA-01 | Mixture-of-Recursions (MoR) | completed (neutral) | 3 (R1,R3,R2) | 3 (nondom) | MoR worse than ACT-halting baseline at all tested balance weights (R1 bal0.01: 2.310121@1200; R3 bal0.10: 2.316171@1050; R2 bal1.0: training collapse) | NO — MoR redundant w/ existing ACT per-token halting; baseline unchanged |
 | RA-02 | Hyperloop Multi-Stream | not-started | 0 | 0 | — | — |
-| RA-03 | LT2 Hybrid Attention | not-started | 0 | 0 | — | — |
+| RA-03 | LT2 Hybrid Attention | completed (neutral) | 2 (R1,R2) | 2 (near-null; net-neg on MoD-on) | R1 MoD-off+LT2: 2.306684@1200 (Δ-0.000295 vs R0 2.306979, late-crossover, 4.75x slower); R2 MoD-on+LT2: 2.305519@1200 (Δ+0.000549 WORSE than best 2.304970) | NO — near-null at MoD-off, net-negative on current best MoD-on; primary criteria (2.2x decode speedup, N=32768) unmeasurable in training harness (no decode bench, naive scan 4.75x slower); baseline unchanged |
 | **RA-04** | **Mixture-of-Depths (MoD)** | **completed (adopted-with-wins)** | **3** | **0 (win)** | R1+R2 cap-0.5: val_bpb **2.304970** @1200 (beats R0 2.306978 by 0.0020; exact replication; −19% train time, −18% VRAM) | **YES — NANO_MOD=1/cap 0.5 adopted into baseline (env-carried)** |
 | RA-05 | Rank-Adaptive Depth LoRA | not-started | 0 | 0 | — | — |
 | **RA-06** | **Parcae LTI Stability** | **completed (adopted-with-wins)** | **6** | **0 (win)** | ρ(A) pinned 0.950, val_bpb 2.559975 @800 (beats baseline 2.566979 by 0.0070) | **YES — full Parcae (init + e-norm + depth sample) adopted into baseline** |
@@ -1104,3 +1104,98 @@ avg_loops 2.05/8 both.
 ### Phase B status
 Phase B QUEUED — Phase A still has unfinished avenues (RA-03, RA-05, RA-02,
 RA-07, RA-09, RA-10, RA-12). Do not touch TTT avenues early.
+
+
+## Session Date: 2026-09-17 — RA-03 LT2 Hybrid Attention (Avenue 3)
+================================================================
+
+### Setup
+Phase A next avenue after RA-11 (neutral). Current best baseline = Parcae (RA-06)
++ RoPE loop-index (RA-08) + MoD cap-0.5 (RA-04), val_bpb 2.304970 @1200.
+Per plan order Phase 3: RA-03 (this), then RA-05, RA-02.
+
+### Paper note
+Authoritative reference = local PDF `docs/research_plan/papers/LT2 Linear-Time
+Looped Transformers.pdf` (plan's arXiv:2605.20670 is a forward-dated placeholder).
+The paper's real GDN is a GATED DELTA RULE (DPLR linear attention, LT2 Sec 2.2
+Eq.4; KDA as running example): per-head recurrent state S_t in R^{d_k x d_v},
+  A_t = Diag(alpha_t)(I - beta_t k_t k_t^T);  S_t = A_t S_{t-1} + beta_t k_t v_t^T;  O_t = q_t S_t
+The plan's simplified "S_t = S_{t-1} + K_t^T V_t" is the un-gated (alpha=1,beta=1)
+special case; I implemented the paper's gated form for fidelity (per-channel
+learned decay alpha, per-head write strength beta, float32 scan = plan's
+numerical-stability mitigation). The paper's hybrid mixes mixers ACROSS LOOP
+ITERATIONS: even loops -> linear (GDN), odd loops -> full attention (plan's
+"1 Full Attention step" option — keeps the odd path bit-consistent with baseline).
+
+### Conflict note (carry-over rule)
+MoD (RA-04, adopted) and LT2 share the block attention code path. MoD's per-loop
+token-bypass would run the GDN sequential scan over only MoD's top-k subsequence,
+breaking "linear attention over the FULL sequence" semantics (bypassed tokens'
+linear state goes stale — same class of issue as RA-11's stale-KV). Per the
+carry-over rule I EXCLUDED the conflicting component (MoD) and isolated LT2.
+R0/R1 run MoD-OFF (only NANO_LT2 differs); R0 doubles as a bit-consistency
+anchor vs RA-04's MoD-off reference. R2 tests the adoption-relevant question
+(MoD-on + LT2 vs the current best MoD-on baseline).
+
+### Implementation (training/nano_mythos_train.py, env-gated NANO_LT2, default OFF)
+- New class `GDNAttention` — gated-delta-rule linear attention: wq/wk/wv/wo +
+  log_alpha (per-key-channel decay, head_dim) + beta_proj (per-head write
+  strength); sequential causal float32 scan (inherently causal, no mask);
+  O(N) vs O(N^2). In-file per the nano harness pattern (plan's
+  open_mythos/lt2_attention.py targets the OpenMythos repo; nano keeps modules
+  in nano_mythos_train.py).
+- `TransformerBlock.forward` now takes `loop_t`; even loop -> GDN, odd/None ->
+  full GQA (prelude/coda stay full). `RecurrentBlock` passes `loop_t=t`.
+- Env: NANO_LT2 (default False). LT2-off path is bit-identical to prior code.
+- Confirmed: 2 shape bugs fixed during smoke (beta T-axis indexing; alpha must
+  scale the d_k ROW axis of S, and log_alpha is head_dim-sized not dim-sized).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4, cosine to 0, venv)
+Runners run_ra03_exp.sh (R0/R1) + run_ra03_r2.sh (R2), archived on completion.
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | **1200 final** |
+|------|-----|-----|-----|-----|-----|-----|------|----------------|
+| R0 (MoD-off, LT2-off) | 3.132146 | 2.820517 | 2.600419 | 2.458769 | 2.371704 | 2.326308 | 2.309442 | **2.306979** |
+| R1 (MoD-off, +LT2)    | 3.132882 | 2.821161 | 2.601213 | 2.459429 | 2.371809 | 2.326136 | 2.309147 | **2.306684** |
+| R1-R0 Delta           | +0.000736 | +0.000644 | +0.000794 | +0.000660 | +0.000105 | -0.000172 | -0.000295 | **-0.000295** |
+| R2 (MoD-on, +LT2)     | 3.133358 | 2.821960 | 2.601316 | 2.458452 | 2.370485 | 2.324881 | 2.307964 | **2.305519** |
+| REF (MoD-on, LT2-off = current best) | ... | ... | ... | ... | ... | ... | ... | **2.304970** |
+
+R0 reproduces RA-04's MoD-off reference (2.306978) to 1e-6 — the LT2-gated patch
+is bit-consistent on the LT2-off path (same verification as RA-04/RA-11).
+
+### Decision: RA-03 COMPLETE — neutral (not adopted)
+- **Adoption-relevant test (R2 vs current best):** MoD-on + LT2 = 2.305519 is
+  **+0.000549 WORSE** than the current best MoD-on (2.304970). Adding LT2 to the
+  adopted config does NOT help — MoD alone is better. Primary adoption answer: NO.
+- **Clean LT2 signal (R1 vs R0, MoD-off):** +0.000295, a LATE-CROSSOVER
+  (R1 worse through step 750, better only 900-1200) — a marginal/noise signature,
+  far below the 0.0020 MoD win and within the seed-noise band (RA-11 nulls were
+  1e-6; this is ~0.0003, not a robust structural win).
+- **Throughput/VRAM (the plan's actual headline):** the naive sequential GDN scan
+  is **4.75x SLOWER** in training than full GQA (R1 1602s vs R0 337s; R2 929s vs
+  REF 245s) with +25% VRAM (R1) — the opposite of the plan's "2.2x decoding
+  speedup." The plan's speedup comes from FLA CHUNK-PARALLEL kernels + a
+  DECODE/long-context benchmark (N=32768), neither of which exists in this
+  small-model training harness (seq capped 512/2048). So the primary criteria
+  (2.2x decode speedup, linear scaling to N=32768) are NOT measurable here —
+  same class of "future work" as RA-01 (MoR FLOPs) and RA-11 (recycle decode BW).
+- **Perplexity criterion (the only in-harness one):** loss within 0.02 of full
+  quadratic attention — MET (max |Delta| 0.0008), but as a near-null, not a win.
+- 5-strike: 2 non-improving (R1 near-null, R2 worse). Early close justified per
+  RA-01/RA-11 precedent: the mechanism's payoff (linear-time efficiency at
+  scale) is unmeasurable in this harness, the in-harness quality signal is a
+  near-null, and it is net-negative on the actual current baseline. Further
+  GDN-tuning variants are low-value given 4.75x slower training for a 0.0003
+  in-harness effect and an out-of-scope payoff.
+- Baseline unchanged: **val_bpb 2.304970 @1200** (Parcae + RoPE + MoD-0.5).
+  LT2 NOT carried (neutral/net-negative).
+
+### Next session
+1. Start **RA-05 (Rank-Adaptive Depth LoRA — Relaxed Recursive Transformers)**
+   per plan order (Phase 3: RA-03 done, then RA-05, RA-02). Paper:
+   `docs/research_plan/papers/Relaxed Recursive Transformers.pdf`.
+2. Baseline MUST include full Parcae + RoPE + MoD-0.5 (NANO_MOD=1,
+   NANO_MOD_CAPACITY=0.5). Check conflicts before implementing.
+3. Venv route proven again (3/3 runs clean). Per-avenue runners run_ra03_exp.sh
+   + run_ra03_r2.sh moved to scripts/archive/.

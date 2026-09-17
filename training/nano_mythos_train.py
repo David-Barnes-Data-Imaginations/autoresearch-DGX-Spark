@@ -78,6 +78,8 @@ class NanoMythosConfig:
     kv_recycle: bool = False         # reuse K/V across loops via EMA (plan Sec RA-11)
     kv_alpha: float = 0.7            # EMA weight on previous-loop K/V (plan default)
     kv_dynamic: bool = True          # dynamic schedule alpha(t)=amax*(1-exp(-t/2)) (plan fix)
+    # --- RA-03: LT2 Hybrid Attention (GDN linear on even loops, full on odd) ---
+    lt2: bool = False                # loop-axis hybrid: even->GDN, odd->full GQA
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +206,76 @@ class GQAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# RA-03 LT2: Linear Gated Attention (GDN — gated delta rule, DPLR linear attn)
+# ---------------------------------------------------------------------------
+# Paper (LT2, Sec 2.2, Eq.4; KDA as running example) — per-head recurrent state
+# S_t in R^{d_k x d_v} updated token-by-token (causal by construction, O(N)):
+#     A_t = Diag(alpha_t) (I - beta_t k_t k_t^T)      (identity + rank-1 DPLR)
+#     S_t = A_t S_{t-1} + beta_t k_t v_t^T
+#     O_t = q_t S_t
+# Expanding A_t:  S_t = alpha S_{t-1} - alpha*beta*k (k^T S_{t-1}) + beta k v^T
+# alpha in (0,1) per-channel learned decay; beta in (0,1) per-head write strength.
+# The plan's simplified "S_t = S_{t-1} + K_t^T V_t" is the un-gated
+# (alpha=1, beta=1) special case; we implement the paper's gated form for
+# fidelity. Scan runs in float32 (plan's numerical-stability mitigation) and is
+# inherently causal — no explicit mask needed. NOTE: this is a naive sequential
+# Python scan; the paper's headline speedup needs chunk-parallel FLA kernels,
+# which are out of scope for this validation harness (see SESSION_NOTES).
+
+class GDNAttention(nn.Module):
+    """Gated Delta Net linear attention (LT2 GDN). O(N) causal, per-head state."""
+    def __init__(self, cfg: NanoMythosConfig):
+        super().__init__()
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.dim // cfg.n_heads
+        self.wq = nn.Linear(cfg.dim, cfg.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(cfg.dim, cfg.n_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(cfg.dim, cfg.n_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(cfg.n_heads * self.head_dim, cfg.dim, bias=False)
+        # Gated-delta params. alpha: per-key-channel decay (d_k,) -> applied on
+        # the row axis of S (Diag(alpha) @ S). beta: per-head write strength.
+        self.log_alpha = nn.Parameter(torch.zeros(self.head_dim))
+        self.beta_proj = nn.Linear(cfg.dim, self.n_heads, bias=False)
+        nn.init.normal_(self.beta_proj.weight, std=0.02)
+
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask=None) -> torch.Tensor:
+        B, T, _ = x.shape
+        q = self.wq(x).view(B, T, self.n_heads, self.head_dim)
+        k = self.wk(x).view(B, T, self.n_heads, self.head_dim)
+        v = self.wv(x).view(B, T, self.n_heads, self.head_dim)
+        q = apply_rope(q, freqs_cis)
+        k = apply_rope(k, freqs_cis)
+        # alpha (1,1,d,1): per-key-channel decay, scales ROWS of S (axis -2).
+        alpha = torch.sigmoid(self.log_alpha).float().view(1, 1, self.head_dim, 1)
+        # beta (B,T,H,1): per-head write strength (T is axis 1, before transpose).
+        beta = torch.sigmoid(self.beta_proj(x)).float().view(B, T, self.n_heads, 1)
+        q = q.transpose(1, 2).float()   # (B,H,T,d)
+        k = k.transpose(1, 2).float()
+        v = v.transpose(1, 2).float()
+        # Sequential causal scan (float32 for numerical stability).
+        d = self.head_dim
+        S = torch.zeros(B, self.n_heads, d, d, device=x.device, dtype=torch.float32)
+        outs = torch.empty(B, self.n_heads, T, d, device=x.device, dtype=torch.float32)
+        for t in range(T):
+            qt = q[:, :, t, :]          # (B,H,d)
+            kt = k[:, :, t, :]          # (B,H,d)
+            vt = v[:, :, t, :]          # (B,H,d)
+            bt = beta[:, t, :, :]       # (B,H,1)  [beta is (B,T,H,1): T is axis 1]
+            # k^T S_{t-1} in R^{d_k x d_v}: kS[c] = sum_i k[i] S[i,c].
+            kS = torch.einsum("bhi,bhij->bhj", kt, S)          # (B,H,d)
+            # Expand A_t S = alpha*S - alpha*beta*k (k^T S) + beta*k v^T.
+            bt4 = bt.unsqueeze(-1)      # (B,H,1,1)
+            kt1 = kt.unsqueeze(-1)      # (B,H,d,1)
+            kS2 = kS.unsqueeze(-2)      # (B,H,1,d)
+            kv1 = vt.unsqueeze(-2)      # (B,H,1,d)
+            delta = alpha * kt1 * kS2   # (B,H,d,d) = Diag(alpha) (k k^T S)
+            S = alpha * S - bt4 * delta + bt4 * kt1 * kv1
+            outs[:, :, t, :] = torch.einsum("bhi,bhij->bhj", qt, S)
+        out = outs.transpose(1, 2).contiguous().view(B, T, -1).to(x.dtype)
+        return self.wo(out)
+
+
+# ---------------------------------------------------------------------------
 # SwiGLU FFN (dense, no MoE for small model)
 # ---------------------------------------------------------------------------
 
@@ -230,11 +302,22 @@ class TransformerBlock(nn.Module):
         self.attn_norm = RMSNorm(cfg.dim)
         self.ffn_norm = RMSNorm(cfg.dim)
         self.attn = GQAttention(cfg)
+        # RA-03 LT2: optional GDN linear attention (used on even loop iterations)
+        self.lt2 = cfg.lt2
+        self.gdn = GDNAttention(cfg) if cfg.lt2 else None
         self.ffn = SwiGLU(cfg.dim, cfg.dim * 4)
         self.resid_drop = nn.Dropout(cfg.dropout)
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask=None) -> torch.Tensor:
-        x = x + self.resid_drop(self.attn(self.attn_norm(x), freqs_cis, mask))
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask=None, loop_t: int = None) -> torch.Tensor:
+        # RA-03 LT2: hybrid attention by loop parity. Even loop -> GDN (linear,
+        # O(N)); odd loop or loop_t None (prelude/coda) -> full GQA (existing,
+        # bit-consistent with baseline). GDN is inherently causal so the mask is
+        # not applied on the GDN path (kept for the full path).
+        if (self.lt2 and self.gdn is not None and loop_t is not None and (loop_t % 2 == 0)):
+            a_out = self.gdn(self.attn_norm(x), freqs_cis, mask)
+        else:
+            a_out = self.attn(self.attn_norm(x), freqs_cis, mask)
+        x = x + self.resid_drop(a_out)
         x = x + self.resid_drop(self.ffn(self.ffn_norm(x)))
         return x
 
@@ -576,7 +659,7 @@ class RecurrentBlock(nn.Module):
                     prev_k[:, topk_idx, :] = k_topk_new
                     prev_v[:, topk_idx, :] = v_topk_new
                 else:
-                    blk = self.block(x_topk, freqs_topk, mask_k)
+                    blk = self.block(x_topk, freqs_topk, mask_k, loop_t=t)
                 blk = blk + self.lora(blk, t)
                 # Raposo et al.: scale by router confidence -> gradient to router.
                 blk = blk * scores[:, topk_idx].unsqueeze(-1)
@@ -597,7 +680,7 @@ class RecurrentBlock(nn.Module):
                     trans_out, prev_k, prev_v = self.block.forward_recycled(
                         combined, freqs_cis, mask, prev_k, prev_v, alpha_t)
                 else:
-                    trans_out = self.block(combined, freqs_cis, mask)
+                    trans_out = self.block(combined, freqs_cis, mask, loop_t=t)
                 trans_out = trans_out + self.lora(trans_out, t)
                 h = self.injection(h, e, trans_out)
 
@@ -824,6 +907,8 @@ MOD_NOISE = _env_float("NANO_MOD_NOISE", 0.1)
 KV_RECYCLE = _env_bool("NANO_KV_RECYCLE", False)
 KV_ALPHA = _env_float("NANO_KV_ALPHA", 0.7)
 KV_DYNAMIC = _env_bool("NANO_KV_DYNAMIC", True)
+# RA-03: LT2 Hybrid Attention (GDN on even loops, full on odd; default OFF)
+LT2 = _env_bool("NANO_LT2", False)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -837,7 +922,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"rope_loop={ROPE_LOOP} rope_theta={ROPE_LOOP_THETA} "
       f"mor={MOR} mor_choices={MOR_CHOICES} mor_aux_w={MOR_AUX_WEIGHT} "
       f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} "
-      f"kv_recycle={KV_RECYCLE} kv_alpha={KV_ALPHA} kv_dynamic={KV_DYNAMIC} tag={CKPT_TAG}")
+      f"kv_recycle={KV_RECYCLE} kv_alpha={KV_ALPHA} kv_dynamic={KV_DYNAMIC} "
+      f"lt2={LT2} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +970,7 @@ cfg = NanoMythosConfig(
     kv_recycle=KV_RECYCLE,
     kv_alpha=KV_ALPHA,
     kv_dynamic=KV_DYNAMIC,
+    lt2=LT2,
 )
 
 with torch.device("meta"):
