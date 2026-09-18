@@ -80,6 +80,11 @@ class NanoMythosConfig:
     kv_dynamic: bool = True          # dynamic schedule alpha(t)=amax*(1-exp(-t/2)) (plan fix)
     # --- RA-03: LT2 Hybrid Attention (GDN linear on even loops, full on odd) ---
     lt2: bool = False                # loop-axis hybrid: even->GDN, odd->full GQA
+    # --- RA-05: Rank-Adaptive Depth LoRA (Relaxed Recursive Transformers) ---
+    rad_lo: bool = False               # rank-growing per-depth LoRA delta on looped block
+    rad_base_rank: int = 8             # r(t) = base_rank + t*rank_step
+    rad_rank_step: int = 4
+    rad_gamma: float = 0.1             # scale LoRA output by gamma / r(t)
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +396,45 @@ class LoRAAdapter(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# RA-05: Rank-Adaptive Depth LoRA (Relaxed Recursive Transformers, Bae et al.)
+# ---------------------------------------------------------------------------
+# Paper (arXiv:2410.20672 Sec 2.3, Eq.3/5): a Recursive Transformer loops ONE
+# shared block; a Relaxed Recursive Transformer relaxes the weight-tying by
+# adding a per-depth low-rank delta to the shared layer, rank growing with
+# recurrence depth t: r(t) = base_rank + t*rank_step (plan's DynamicDepthLoRA),
+# scaled by gamma / r(t) (plan's early-training mitigation). Self-contained
+# dim->r(t)->dim low-rank module. B zero-init => delta=0 at init => bit-
+# consistent with the strictly-tied baseline at step 0 (the paper's SVD init
+# targets uptraining a converted full-size model, not from-scratch training).
+class RankAdaptiveDepthLoRA(nn.Module):
+    """Per-loop rank-growing LoRA delta, dim -> r(t) -> dim."""
+    def __init__(self, dim, max_loops, base_rank=8, rank_step=4, gamma=0.1):
+        super().__init__()
+        self.base_rank = base_rank
+        self.rank_step = rank_step
+        self.max_loops = max_loops
+        self.gamma = gamma
+        self.A = nn.ParameterList()
+        self.B = nn.ParameterList()
+        for t in range(max_loops):
+            r = base_rank + t * rank_step
+            A = nn.Parameter(torch.empty(r, dim))
+            B = nn.Parameter(torch.empty(dim, r))
+            nn.init.normal_(A, std=0.02)
+            nn.init.zeros_(B)  # delta=0 at init
+            self.A.append(A)
+            self.B.append(B)
+
+    def forward(self, x, loop_t):
+        t = min(loop_t, self.max_loops - 1)
+        r = self.base_rank + t * self.rank_step
+        scale = self.gamma / r
+        down = x @ self.A[t].t()   # (..., dim) -> (..., r)
+        up = down @ self.B[t].t()  # (..., r) -> (..., dim)
+        return up * scale
+
+
+# ---------------------------------------------------------------------------
 # LTI-stable injection (spectral radius < 1 by construction)
 # ---------------------------------------------------------------------------
 
@@ -516,6 +560,12 @@ class RecurrentBlock(nn.Module):
         self.injection = LTIInjection(cfg.dim)
         self.act = ACTHalting(cfg.dim)
         self.lora = LoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
+        # RA-05: rank-adaptive depth LoRA delta on the looped block (env-gated)
+        self.rad_lo = cfg.rad_lo
+        self.rad_lo_adapter = (
+            RankAdaptiveDepthLoRA(cfg.dim, cfg.max_loop_iters, cfg.rad_base_rank,
+                                  cfg.rad_rank_step, cfg.rad_gamma) if cfg.rad_lo else None
+        )
         self.norm = RMSNorm(cfg.dim)
         self.loop_dim = cfg.dim // 8  # fraction of channels receiving loop-index embedding
         # RA-08: RoPE loop-index rotation over full dim (optional)
@@ -661,6 +711,8 @@ class RecurrentBlock(nn.Module):
                 else:
                     blk = self.block(x_topk, freqs_topk, mask_k, loop_t=t)
                 blk = blk + self.lora(blk, t)
+                if self.rad_lo and self.rad_lo_adapter is not None:
+                    blk = blk + self.rad_lo_adapter(blk, t)
                 # Raposo et al.: scale by router confidence -> gradient to router.
                 blk = blk * scores[:, topk_idx].unsqueeze(-1)
                 trans_full = torch.zeros_like(combined)
@@ -682,6 +734,8 @@ class RecurrentBlock(nn.Module):
                 else:
                     trans_out = self.block(combined, freqs_cis, mask, loop_t=t)
                 trans_out = trans_out + self.lora(trans_out, t)
+                if self.rad_lo and self.rad_lo_adapter is not None:
+                    trans_out = trans_out + self.rad_lo_adapter(trans_out, t)
                 h = self.injection(h, e, trans_out)
 
             if use_mor:
@@ -909,6 +963,11 @@ KV_ALPHA = _env_float("NANO_KV_ALPHA", 0.7)
 KV_DYNAMIC = _env_bool("NANO_KV_DYNAMIC", True)
 # RA-03: LT2 Hybrid Attention (GDN on even loops, full on odd; default OFF)
 LT2 = _env_bool("NANO_LT2", False)
+# RA-05: Rank-Adaptive Depth LoRA (Relaxed Recursive Transformers)
+RAD_LO = _env_bool("NANO_RAD_LO", False)
+RAD_BASE_RANK = _env_int("NANO_RAD_BASE_RANK", 8)
+RAD_RANK_STEP = _env_int("NANO_RAD_RANK_STEP", 4)
+RAD_GAMMA = _env_float("NANO_RAD_GAMMA", 0.1)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -923,7 +982,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"mor={MOR} mor_choices={MOR_CHOICES} mor_aux_w={MOR_AUX_WEIGHT} "
       f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} "
       f"kv_recycle={KV_RECYCLE} kv_alpha={KV_ALPHA} kv_dynamic={KV_DYNAMIC} "
-      f"lt2={LT2} tag={CKPT_TAG}")
+      f"lt2={LT2} rad_lo={RAD_LO} rad_r0={RAD_BASE_RANK} rad_rs={RAD_RANK_STEP} "
+      f"rad_gamma={RAD_GAMMA} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -971,6 +1031,10 @@ cfg = NanoMythosConfig(
     kv_alpha=KV_ALPHA,
     kv_dynamic=KV_DYNAMIC,
     lt2=LT2,
+    rad_lo=RAD_LO,
+    rad_base_rank=RAD_BASE_RANK,
+    rad_rank_step=RAD_RANK_STEP,
+    rad_gamma=RAD_GAMMA,
 )
 
 with torch.device("meta"):
