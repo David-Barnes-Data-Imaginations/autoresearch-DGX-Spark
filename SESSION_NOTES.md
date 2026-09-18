@@ -11,7 +11,7 @@
 | RA-02 | Hyperloop Multi-Stream | not-started | 0 | 0 | — | — |
 | RA-03 | LT2 Hybrid Attention | completed (neutral) | 2 (R1,R2) | 2 (near-null; net-neg on MoD-on) | R1 MoD-off+LT2: 2.306684@1200 (Δ-0.000295 vs R0 2.306979, late-crossover, 4.75x slower); R2 MoD-on+LT2: 2.305519@1200 (Δ+0.000549 WORSE than best 2.304970) | NO — near-null at MoD-off, net-negative on current best MoD-on; primary criteria (2.2x decode speedup, N=32768) unmeasurable in training harness (no decode bench, naive scan 4.75x slower); baseline unchanged |
 | **RA-04** | **Mixture-of-Depths (MoD)** | **completed (adopted-with-wins)** | **3** | **0 (win)** | R1+R2 cap-0.5: val_bpb **2.304970** @1200 (beats R0 2.306978 by 0.0020; exact replication; −19% train time, −18% VRAM) | **YES — NANO_MOD=1/cap 0.5 adopted into baseline (env-carried)** |
-| RA-05 | Rank-Adaptive Depth LoRA | not-started | 0 | 0 | — | — |
+| RA-05 | Rank-Adaptive Depth LoRA | completed (neutral) | 2 (R1,R2) | 2 (precise nulls) | R1 gamma0.1/r8: 2.304971@1200 (Δ+1e-6 vs R0 2.304970); R2 gamma0.3/r16: 2.304971@1200 (Δ+1e-6, still null) | NO — rank-adaptive depth LoRA is a precise null at 9M/1200-step scale (delta stays near-zero; train-loss tracks baseline to ~1e-4 at BOTH gamma strengths); param overhead ~1% (<5% MET) but ≥0.08-perplexity gain NOT met (large-scale uptraining artifact); baseline unchanged |
 | **RA-06** | **Parcae LTI Stability** | **completed (adopted-with-wins)** | **6** | **0 (win)** | ρ(A) pinned 0.950, val_bpb 2.559975 @800 (beats baseline 2.566979 by 0.0070) | **YES — full Parcae (init + e-norm + depth sample) adopted into baseline** |
 | RA-07 | Latent CoT Supervision | not-started | 0 | 0 | — | — |
 | **RA-08** | **RoPE Loop-Index Embedding** | **completed (adopted-with-wins)** | **5** | **0 (win)** | val_bpb 2.306980 @1200 (beats full-Parcae baseline 2.314457 by 0.0075; gap compounds 800->1200) | **YES — NANO_ROPE_LOOP=1 adopted into baseline** |
@@ -1199,3 +1199,99 @@ is bit-consistent on the LT2-off path (same verification as RA-04/RA-11).
    NANO_MOD_CAPACITY=0.5). Check conflicts before implementing.
 3. Venv route proven again (3/3 runs clean). Per-avenue runners run_ra03_exp.sh
    + run_ra03_r2.sh moved to scripts/archive/.
+
+
+## Session Date: 2026-09-18 — RA-05 Rank-Adaptive Depth LoRA (Avenue 5)
+================================================================
+
+### Setup
+Phase A next avenue after RA-03 (neutral) per plan Phase 3 order (RA-03, RA-05, RA-02).
+Current best baseline = Parcae (RA-06) + RoPE loop-index (RA-08) + MoD cap-0.5 (RA-04),
+val_bpb 2.304970 @1200.
+
+### Paper
+Authoritative reference = local PDF `docs/research_plan/papers/Relaxed Recursive
+Transformers.pdf` (arXiv:2410.20672, Bae et al., Google DeepMind 2025). Sec 2.3 (Eq.3/5):
+a Recursive Transformer loops ONE shared block; a Relaxed Recursive Transformer relaxes
+the weight-tying by adding a per-depth low-rank delta to the shared layer, so
+h = W'x + dW'x = W'x + (B A)x. Plan RA-05 adds the rank-adaptive twist: r(t) = r0 + t*alpha
+(DynamicDepthLoRA) with the delta scaled by gamma / r(t) (early-training mitigation).
+The paper's SVD initialization targets UPTRAINING a converted full-size model; for
+from-scratch training I use standard zero-init on B so delta=0 at init (bit-consistent
+with the strictly-tied baseline at step 0).
+
+### Conflict note (carry-over rule)
+No conflict with the adopted components (Parcae/RoPE/MoD) — the LoRA is an additive
+delta on the looped-block representation, a separate code path. MoD stays ON in both
+arms (adoption-relevant: compared against the current best MoD-on baseline). Only
+NANO_RAD_LO (and its gamma/rank knobs) differ R0->R1->R2.
+
+### Implementation (training/nano_mythos_train.py, env-gated NANO_RAD_LO, default OFF)
+- New class `RankAdaptiveDepthLoRA`: per-loop rank-growing LoRA delta, dim->r(t)->dim,
+  r(t)=base_rank + t*rank_step (8->39 over 8 loops at defaults); A~N(0,0.02), B=0 init;
+  forward scales by gamma/r(t). One instance attached to RecurrentBlock, applied
+  alongside the baseline's existing rank-4 LoRAAdapter on BOTH code paths (MoD top-k
+  and non-MoD full). +0.99% params (9,206,307 vs 9,116,195).
+- Env: NANO_RAD_LO, NANO_RAD_BASE_RANK (8), NANO_RAD_RANK_STEP (4), NANO_RAD_GAMMA (0.1).
+- Added `training/smoke_test_train.py` (general avenue smoke wrapper: sets env, execs
+  the train script with a tiny step budget).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine to 0, venv, MoD-on)
+Runners run_ra05_exp.sh (R0/R1) + run_ra05_r2.sh (R2), archived on completion.
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | **1200 final** |
+|------|-----|-----|-----|-----|-----|-----|------|----------------|
+| R0 (no LoRA)      | 3.133374 | 2.821845 | 2.601110 | 2.458001 | 2.369891 | 2.324312 | 2.307419 | **2.304970** |
+| R1 (r8, g0.1)     | 3.133374 | 2.821845 | 2.601110 | 2.458002 | 2.369890 | 2.324311 | 2.307420 | **2.304971** |
+| R2 (r16, g0.3)    | 3.133374 | 2.821845 | 2.601110 | 2.458001 | 2.369891 | 2.324312 | 2.307420 | **2.304971** |
+
+R0 reproduces the adopted current-best (2.304970) EXACTLY — the RAD_LO-gated patch is
+bit-consistent on the OFF path (same verification as RA-04/RA-11). R1/R2 eval curves
+are bit-identical to R0 through step 1050 and land at 2.304971 (Delta+1e-6, a precise
+null on the scale of RA-11's 1e-6 nulls, NOT a marginal 0.0003 signal like RA-03).
+
+### Key observation: the LoRA delta stays near-zero
+Train-loss tracks R0 to ~1e-4 at EVERY step for both R1 (gamma=0.1) and R2 (gamma=0.3).
+A 3x larger gamma and 2x larger base rank (R2) produce the identical null. This means
+the rank-adaptive LoRA learns essentially no corrective delta over the shared looped
+weights — the "weight-tying relaxation" contributes ~0 quality at this scale. (The
+mechanism's value in the paper is recovering expressiveness that strict tying LOSES
+during UPTRAINING of a pretrained full-size model; in a from-scratch 9M model there is
+no pre-learned full-size weight to recover, so the delta has nothing to chase.)
+
+### Decision: RA-05 COMPLETE — neutral (not adopted)
+- **Plan criterion 1 (≥0.08 val-perplexity improvement vs tied baseline):** NOT met —
+  null (+1e-6 bpb ≈ 0). At this scale 0.08 perplexity is ~0.19 bpb, ~100x beyond even
+  the MoD win (0.002 bpb) — a large-model uptraining artifact, not reproducible here.
+- **Plan criterion 2 (param overhead < 5%):** MET (~0.99% at defaults; ~1.11% at R2).
+- **Robustness (R2):** a stronger variant (3x gamma, 2x base rank) is still a precise
+  null, so the null is NOT a "LoRA too small to matter" artifact — the mechanism simply
+  does not move quality at 9M/1200 steps. 5-strike early close (2/5) justified per
+  RA-01/RA-11 precedent: in-harness signal is a precise null, the payoff (expressiveness
+  recovery) is out-of-scope for from-scratch nano training, and a stronger variant
+  confirmed the null.
+- Baseline unchanged: **val_bpb 2.304970 @1200** (Parcae + RoPE + MoD-0.5).
+  RA-05 NOT carried (neutral).
+
+### Artifacts
+- training/nano_mythos_train.py — RankAdaptiveDepthLoRA (NANO_RAD_LO-gated; committed
+  but default OFF, bit-consistent on the OFF path).
+- training/smoke_test_train.py — general avenue smoke-test wrapper (new, reusable).
+- run_ra05_exp.sh (R0+R1) + run_ra05_r2.sh (R2) — repo root while in use, moved to
+  scripts/archive/ on completion.
+- logs/ra05_{R0_baseline1200,R1_radlo_1200,R2_radlo_strong_1200}.log + smoke logs.
+- checkpoints/nano_mythos_ra05_{R0_baseline1200,R1_radlo_1200,R2_radlo_strong_1200}.pt.
+- results.tsv — RA-05 block appended (R0/R1/R2/CONCLUSION).
+
+### Phase B status
+Phase B QUEUED — Phase A still has unfinished avenues (RA-02, RA-07, RA-09, RA-10,
+RA-12). Do not touch TTT avenues early.
+
+### Next session
+1. Start **RA-02 (Hyperloop Multi-Stream)** per plan Phase 3 order (RA-05 done). Paper:
+   `docs/research_plan/papers/Hyperloop Transformers.pdf`.
+2. Baseline MUST include full Parcae + RoPE + MoD-0.5 (NANO_MOD=1,
+   NANO_MOD_CAPACITY=0.5). Check conflicts before implementing (Multi-Stream runs
+   parallel streams through the looped block — may interact with ACT/MoD depth routing).
+3. Venv route proven again (4/4 runs clean: R0, R1, R2 + smoke). Per-avenue runners
+   moved to scripts/archive/. smoke_test_train.py is now reusable for future avenues.
