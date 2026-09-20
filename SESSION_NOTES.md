@@ -1295,3 +1295,73 @@ RA-12). Do not touch TTT avenues early.
    parallel streams through the looped block — may interact with ACT/MoD depth routing).
 3. Venv route proven again (4/4 runs clean: R0, R1, R2 + smoke). Per-avenue runners
    moved to scripts/archive/. smoke_test_train.py is now reusable for future avenues.
+
+
+## Session Date: 2026-09-20 — RA-02 Hyperloop Multi-Stream (Avenue 2)
+================================================================
+
+### Setup
+Phase A next avenue after RA-05 (neutral) per plan Phase 3 order (RA-03, RA-05, RA-02).
+Phase A status at session start: RA-06/RA-08/RA-04 adopted; RA-01/RA-03/RA-05/RA-11
+neutral; RA-02 in progress this session. Remaining after RA-02: RA-07, RA-09, RA-10,
+RA-12.
+
+### Paper
+Authoritative reference = local PDF `docs/research_plan/papers/Hyperloop
+Transformers.pdf` (arXiv:2604.21254, Zeitoun/Torroba-Hennigen/Kim, MIT 2026).
+Middle-cycle looped Transformer (begin/middle/end blocks, only middle looped) +
+HYPER-CONNECTIONS (mHC variant, Xie et al.) applied ONLY at the loop level: expand the
+residual stream to n=4 parallel streams (matrix Y in R^{T,n,C}), read the block input
+x_in = H^pre dot Y, apply the looped block, write back Y_next = H^res dot Y + H^post dot
+trans, add a loop-position embedding e_l, and AVERAGE across streams at the end.
+The paper uses input-dependent (per-token) H matrices; Sec 3 calls a simpler
+parameterization "a more flexible parameterization of looped Transformers". Table 1:
+Hyperloop outperforms depth-matched vanilla + mHC + looped baselines at 240M-2B with
+~50% fewer params (e.g. 150M dim-2048: 14.40 PPL vs 14.85 looped / 14.65 vanilla).
+
+### Conflict note (carry-over rule)
+MoD (RA-04, adopted) and the HC update BOTH rewrite the cross-loop state update path
+(LTI h = A h + B e + trans). The HC update (mixing + per-stream RMSNorm) REPLACES the
+LTI A-decay as the new stabilizer — running MoD on top of HC would leave the K-stream
+matrix Y stale under MoD token-bypass (bypassed positions not updated). Per the
+carry-over rule I EXCLUDED the conflicting component (MoD) and isolated HC: R0/R1 run
+MoD-OFF (RA-03 precedent: isolate the mechanism in the MoD-off arm, test adoption-
+relevant MoD-on in R2 only if R1 shows signal). A guard raises ValueError if
+NANO_HYPERLOOP + NANO_MOD are both set (prevents a silent stale-Y run).
+Parcae (e-norm, depth-sample, init rho~0.95) + RoPE loop-index (both adopted wins) are
+carried; the Parcae e-injection (B e) is preserved inside the HC path by writing B e
+into every stream (the paper +e_l loop-position-embedding term), so R1 vs R0 isolates
+the HC mechanism, not a lost e-injection.
+
+### Implementation (training/nano_mythos_train.py, env-gated NANO_HYPERLOOP, default OFF)
+- New class HyperConnection (loop-level, K=4 streams): static H_pre (K,), H_post (K,),
+  H_res (K,K) + learned per-row decay in (0,1] + per-stream RMSNorm (plan failure-
+  mitigation "LayerNorm over stream dim K"). x_in = einsum(Y, Hpre); Y_new = Hres@Y*decay
+  + einsum(trans, Hpost); per-stream RMSNorm. At init Hpre=[1,0..], Hpost=[1,0..],
+  Hres=I, decay=1 -> block input is stream 0 and Y stays single-stream (bit-equivalent
+  start; the model learns to exploit K streams only if it helps). apply_init() called
+  after to_empty+_init_weights (meta init discards in-__init__ data, same reason as
+  Parcae apply_parcae_init).
+- RecurrentBlock.forward: seed Y = broadcast(h, K) at entry; per iteration fold the
+  working stream h = Y.mean(dim=K) (ACT/MoD/RoPE/e-norm operate on this — the paper
+  "average Y across the parallel streams"); the HC update replaces the LTI update in
+  the FULL (non-MoD) path and re-folds h = Y.mean(dim=K) for ACT. MoD path unchanged
+  (kept LTI; MoD+HC deferred to R2). OFF path (NANO_HYPERLOOP=0) is the pre-existing
+  code verbatim.
+- R1 adds 27 params vs R0 (0.0003%, far under the plan 3% criterion).
+
+### Smoke test
+`python training/smoke_test_train.py --steps 40 --batch_size 4 --extra NANO_HYPERLOOP=1
+NANO_MOD=0` — CLEAN. 40/40 steps, no NaN/divergence, val_bpb 3.215822@10 ->
+3.215428@30 (steady decrease), ~90k tok/s, avg_loops ~2.5-2.6/8, rhoA 0.950. (Two
+debug fixes: (a) the per-stream RMSNorm was applied over the K axis after a permute —
+removed the permute, normalize over last dim D directly; (b) a second
+apply_rope_loop_index callsite in the fold-back block caused a torch.compile
+recompile storm — restructured to the single baseline rope callsite + fold h=Y.mean
+only at the end of the full path.)
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4, MoD-off, Parcae+RoPE)
+Runner run_ra02_exp.sh (R0/R1), repo root while in use.
+R0 = NANO_HYPERLOOP=0 (Parcae+RoPE, MoD-off) — isolates the HC mechanism.
+R1 = NANO_HYPERLOOP=1 (+ loop-level HC over K=4 streams).
+[RUNS IN PROGRESS — results appended on completion.]
