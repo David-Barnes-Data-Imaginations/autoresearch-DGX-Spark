@@ -85,6 +85,9 @@ class NanoMythosConfig:
     rad_base_rank: int = 8             # r(t) = base_rank + t*rank_step
     rad_rank_step: int = 4
     rad_gamma: float = 0.1             # scale LoRA output by gamma / r(t)
+    # --- RA-02: Hyperloop Multi-Stream (Hyperloop Transformers, Zeitoun et al.) ---
+    hyperloop: bool = False            # matrix-valued residual over K hyper-streams (loop-level mHC)
+    hyperloop_streams: int = 4         # K: number of parallel residual streams (paper: 4)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +482,57 @@ class LTIInjection(nn.Module):
 # ACT halting
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# RA-02: Hyper-Connections (loop-level, Hyperloop Transformers Sec 3)
+# ---------------------------------------------------------------------------
+class HyperConnection(nn.Module):
+    """
+    Loop-level hyper-connection update for a K-stream matrix residual
+    Y in R^{B,T,K,D}. Paper (Sec 3, simplified loop-level mHC):
+        x_in   = H^pre  . Y_{t-1}          (read out the C-dim block input)
+        Y_t    = H^res . Y_{t-1} + H^post . trans
+    The paper's H matrices are input-dependent (per-token) projections; here we
+    use a STATIC parameterization (the paper calls this 'a more flexible
+    parameterization of looped Transformers') so the extra parameter overhead is
+    tiny (2K + K^2 scalars) and no per-token K*D projection is needed. At init
+    Hpre=[1,0,..], Hpost=[1,0,..], Hres=I -> block input is the primary stream
+    and Y stays in stream 0, i.e. the mechanism starts single-stream and learns
+    to exploit the K streams only if it helps. Stability (plan failure-mitigation
+    'LayerNorm over stream dim K'): per-stream RMSNorm + learned per-row decay on
+    Hres keeps ||Y_t|| bounded across loop iterations.
+    """
+    def __init__(self, dim: int, K: int, eps: float = 1e-6):
+        super().__init__()
+        self.K = K
+        self.hpre = nn.Parameter(torch.zeros(K));    self.hpre.data[0] = 1.0
+        self.hpost = nn.Parameter(torch.zeros(K));   self.hpost.data[0] = 1.0
+        self.hres = nn.Parameter(torch.eye(K))
+        self.log_decay = nn.Parameter(torch.zeros(K))  # per-row decay in (0,1]
+        self.norm = RMSNorm(dim, eps=eps)
+
+    @torch.no_grad()
+    def apply_init(self):
+        """Set single-stream init. Called AFTER to_empty+_init_weights (the
+        meta-device init path discards in-__init__ data, same reason Parcae
+        uses apply_parcae_init). Stream 0 carries everything; Hres=I, decay=1."""
+        self.hpre.data.zero_();     self.hpre.data[0] = 1.0
+        self.hpost.data.zero_();    self.hpost.data[0] = 1.0
+        self.hres.data.copy_(torch.eye(self.K, device=self.hres.device, dtype=self.hres.dtype))
+        self.log_decay.data.zero_()
+        self.norm.weight.data.fill_(1.0)
+
+    def forward(self, Y: torch.Tensor, trans: torch.Tensor):
+        """Y: (B,T,K,D) prev matrix stream; trans: (B,T,D) block output.
+        Returns (Y_new (B,T,K,D), x_in (B,T,D))."""
+        x_in = torch.einsum("btkd,k->btd", Y, self.hpre)
+        decay = torch.exp(self.log_decay.clamp(-12, 0))          # (K,) in (0,1]
+        Y_res = torch.einsum("btkd,kl->btld", Y, self.hres) * decay.unsqueeze(1)
+        Y_new = Y_res + torch.einsum("btd,k->btkd", trans, self.hpost)
+        Y_new = self.norm(Y_new)  # RMSNorm over last dim D, per-stream (Y_new is (B,T,K,D))
+        return Y_new, x_in
+
+
+
 class ACTHalting(nn.Module):
     """Adaptive Computation Time halting mechanism."""
     def __init__(self, dim: int):
@@ -592,6 +646,19 @@ class RecurrentBlock(nn.Module):
         self.kv_alpha = float(cfg.kv_alpha)
         self.kv_dynamic = bool(cfg.kv_dynamic)
         self.last_kv_alpha = None     # alpha(t) used at last loop (for logging)
+        # RA-02: loop-level hyper-connections over K streams (env-gated; default OFF)
+        self.hyperloop = cfg.hyperloop
+        self.hyperloop_K = int(cfg.hyperloop_streams)
+        self.hc = HyperConnection(cfg.dim, self.hyperloop_K) if cfg.hyperloop else None
+        # RA-02 v1 scope: MoD and HC both rewrite the cross-loop state update
+        # (same code path). HC is only wired into the full (non-MoD) path, so
+        # running them together would leave Y stale under MoD token-bypass.
+        # R0/R1 run MoD-off to isolate HC (RA-03 precedent); a MoD+HC combined
+        # variant is a later attempt only if R1 shows signal.
+        if cfg.hyperloop and cfg.mod:
+            raise ValueError("RA-02 v1: NANO_HYPERLOOP and NANO_MOD are mutually "
+                             "exclusive (both rewrite the cross-loop update path). "
+                             "Run MoD-off to isolate HC.")
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -653,6 +720,15 @@ class RecurrentBlock(nn.Module):
         prev_k = None
         prev_v = None
         self.last_kv_alpha = None
+
+        # RA-02: seed the K-stream matrix residual by broadcasting h across K
+        # (paper: 'expand by copying n times'). Stream 0 carries the state;
+        # with Hpre=[1,0..] the block input equals the folded-back h.
+        use_hyperloop = self.hyperloop and self.hc is not None
+        if use_hyperloop:
+            Y = h.unsqueeze(2).expand(B, T, self.hyperloop_K, D).clone()  # (B,T,K,D)
+        else:
+            Y = None
 
         for t in range(n_loops):
             if not still_running.any():
@@ -736,7 +812,18 @@ class RecurrentBlock(nn.Module):
                 trans_out = trans_out + self.lora(trans_out, t)
                 if self.rad_lo and self.rad_lo_adapter is not None:
                     trans_out = trans_out + self.rad_lo_adapter(trans_out, t)
-                h = self.injection(h, e, trans_out)
+                if use_hyperloop:
+                    # RA-02: cross-loop update via the hyper-connection. The HC
+                    # mixing + per-stream RMSNorm REPLACES the LTI A-decay (the
+                    # new stabilizer); trans is written across K streams instead
+                    # of added directly. We PRESERVE the Parcae e-injection by
+                    # writing B*e into every stream (the paper's +e_l loop-
+                    # position-embedding term), so it persists via Hres mixing.
+                    Y, _ = self.hc(Y, trans_out)
+                    Y = Y + (self.injection.B * e).unsqueeze(2)
+                    h = Y.mean(dim=2)  # ACT/MoD/next-iter rope read this folded h
+                else:
+                    h = self.injection(h, e, trans_out)
 
             if use_mor:
                 # RA-01 token-choice: a token's final active loop is t where
@@ -968,6 +1055,9 @@ RAD_LO = _env_bool("NANO_RAD_LO", False)
 RAD_BASE_RANK = _env_int("NANO_RAD_BASE_RANK", 8)
 RAD_RANK_STEP = _env_int("NANO_RAD_RANK_STEP", 4)
 RAD_GAMMA = _env_float("NANO_RAD_GAMMA", 0.1)
+# RA-02: Hyperloop Multi-Stream (Hyperloop Transformers, loop-level mHC)
+HYPERLOOP = _env_bool("NANO_HYPERLOOP", False)
+HYPERLOOP_STREAMS = _env_int("NANO_HYPERLOOP_STREAMS", 4)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -983,7 +1073,7 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} "
       f"kv_recycle={KV_RECYCLE} kv_alpha={KV_ALPHA} kv_dynamic={KV_DYNAMIC} "
       f"lt2={LT2} rad_lo={RAD_LO} rad_r0={RAD_BASE_RANK} rad_rs={RAD_RANK_STEP} "
-      f"rad_gamma={RAD_GAMMA} tag={CKPT_TAG}")
+      f"rad_gamma={RAD_GAMMA} hyperloop={HYPERLOOP} hyperloop_K={HYPERLOOP_STREAMS} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -1035,6 +1125,8 @@ cfg = NanoMythosConfig(
     rad_base_rank=RAD_BASE_RANK,
     rad_rank_step=RAD_RANK_STEP,
     rad_gamma=RAD_GAMMA,
+    hyperloop=HYPERLOOP,
+    hyperloop_streams=HYPERLOOP_STREAMS,
 )
 
 with torch.device("meta"):
@@ -1053,6 +1145,12 @@ else:
     print(f"[RA-06] original LTI init (no Parcae init): rho(A) = {_rho0:.4f}")
 
 num_params = model.num_params()
+# RA-02: re-init the hyper-connection single-stream (meta init discards __init__ data)
+if getattr(model.recurrent, "hc", None) is not None:
+    model.recurrent.hc.apply_init()
+    print(f"[RA-02] Hyperloop init applied: K={model.recurrent.hyperloop_K} streams "
+          f"(Hpre=[1,0..], Hpost=[1,0..], Hres=I)")
+
 print(f"Model: NanoMythos")
 print(f"Parameters: {num_params:,} ({num_params / 1e6:.1f}M)")
 print(f"Config: {asdict(cfg)}")
