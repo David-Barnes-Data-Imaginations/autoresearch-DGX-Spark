@@ -1364,4 +1364,45 @@ only at the end of the full path.)
 Runner run_ra02_exp.sh (R0/R1), repo root while in use.
 R0 = NANO_HYPERLOOP=0 (Parcae+RoPE, MoD-off) — isolates the HC mechanism.
 R1 = NANO_HYPERLOOP=1 (+ loop-level HC over K=4 streams).
-[RUNS IN PROGRESS — results appended on completion.]
+Both finished 2026-09-20 (results harvested into results.tsv / this section on 2026-10-09;
+SESSION_NOTES had been left at "in progress").
+
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | rhoA |
+|-----|---------|-------------|---------|--------------|-----------|------|
+| R0  | 2.306980 | — | 329.2 | 1093.2 | 2.21/8 | 0.955 |
+| R1  | 2.301925 | -0.005055 | 681.9 | 1923.5 | 4.16/8 | 0.950 |
+
+R1 also beats the current MoD-on best (2.304970) by 0.003045 bpb, but that comparison
+crosses the MoD axis (R1 is MoD-off), so it is not adoption evidence by itself.
+
+### Decision: RA-02 R0/R1 COMPLETE — early-win signal (adoption pending R2)
+- MoD-off isolation arm: CLEAR SIGNAL. R1 improves R0 by 0.005055 bpb (~2.5x the
+  MoD adopt-win of 0.0020), with +27 params (0.0003%, plan <3% MET).
+- Cost: ~2.07x train time, +76% VRAM, avg_loops roughly doubles (2.21 -> 4.16). MFU
+  drops 28.5% -> 13.8%. Acceptable for a quality signal at this scale; revisit if R2
+  does not retain the win under MoD-on.
+- Baseline NOT changed yet: still **val_bpb 2.304970 @1200** (Parcae + RoPE + MoD-0.5).
+  HC stays default-OFF until an adoption-relevant MoD-on R2 confirms the win (carry-over
+  rule / stale-Y conflict under token bypass).
+- Code still has the NANO_HYPERLOOP+NANO_MOD ValueError guard; R2 needs a real
+  MoD+HC coexistence path (update Y under MoD bypass, or an equivalent safe design)
+  before the env flags can be combined.
+
+### Artifacts
+- training/nano_mythos_train.py — HyperConnection + NANO_HYPERLOOP gate (default OFF).
+- run_ra02_exp.sh — R0/R1 runner (repo root while in use; archive after R2).
+- logs/ra02_{R0_baseline1200,R1_hc1200}.log
+- checkpoints/nano_mythos_ra02_{R0_baseline1200,R1_hc1200}.pt
+- results.tsv — RA-02 R0/R1 block appended (harvested 2026-10-09).
+
+### Phase B status
+Phase B QUEUED — Phase A still has unfinished avenues (RA-02 R2, RA-07, RA-09, RA-10,
+RA-12). Do not touch TTT avenues early.
+
+### Next session
+1. Continue **RA-02**: implement MoD+HC coexistence (lift/replace the dual-flag guard
+   safely so MoD bypass does not leave the K-stream Y stale), then run R2 =
+   NANO_MOD=1/cap 0.5 + NANO_HYPERLOOP=1 vs the MoD-on reference 2.304970.
+2. If R2 retains a clear win, adopt HC into baseline (default ON or env-carried) and
+   archive run_ra02_exp.sh; else close RA-02 as mechanism-only / not adopted.
+3. After RA-02 closes: RA-07, RA-09, RA-10, RA-12 per plan Phase 3 remainder.
