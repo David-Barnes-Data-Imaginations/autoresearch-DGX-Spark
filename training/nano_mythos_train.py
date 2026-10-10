@@ -650,15 +650,10 @@ class RecurrentBlock(nn.Module):
         self.hyperloop = cfg.hyperloop
         self.hyperloop_K = int(cfg.hyperloop_streams)
         self.hc = HyperConnection(cfg.dim, self.hyperloop_K) if cfg.hyperloop else None
-        # RA-02 v1 scope: MoD and HC both rewrite the cross-loop state update
-        # (same code path). HC is only wired into the full (non-MoD) path, so
-        # running them together would leave Y stale under MoD token-bypass.
-        # R0/R1 run MoD-off to isolate HC (RA-03 precedent); a MoD+HC combined
-        # variant is a later attempt only if R1 shows signal.
-        if cfg.hyperloop and cfg.mod:
-            raise ValueError("RA-02 v1: NANO_HYPERLOOP and NANO_MOD are mutually "
-                             "exclusive (both rewrite the cross-loop update path). "
-                             "Run MoD-off to isolate HC.")
+        # RA-02 R2: MoD+HC coexistence is supported. Under MoD token-bypass the
+        # HC update is applied only to selected positions; bypassed positions
+        # keep their previous Y (mirrors MoD "keep input" on h). This prevents
+        # the v1 stale-Y failure mode where HC was only wired into the full path.
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -793,11 +788,20 @@ class RecurrentBlock(nn.Module):
                 blk = blk * scores[:, topk_idx].unsqueeze(-1)
                 trans_full = torch.zeros_like(combined)
                 trans_full[:, topk_idx, :] = blk
-                h_new = self.injection(h, e, trans_full)
                 # Plan: bypassed tokens keep input value (direct residual).
                 sel = torch.zeros(B, T, device=h.device, dtype=torch.bool)
                 sel[:, topk_idx] = True
-                h = torch.where(sel.unsqueeze(-1), h_new, h)
+                if use_hyperloop:
+                    # RA-02 R2 MoD+HC coexistence: apply HC to get Y_cand, then
+                    # keep previous Y on bypassed positions so MoD bypass does
+                    # not leave the K-stream matrix inconsistent with h.
+                    Y_cand, _ = self.hc(Y, trans_full)
+                    Y_cand = Y_cand + (self.injection.B * e).unsqueeze(2)
+                    Y = torch.where(sel.unsqueeze(-1).unsqueeze(-1), Y_cand, Y)
+                    h = Y.mean(dim=2)
+                else:
+                    h_new = self.injection(h, e, trans_full)
+                    h = torch.where(sel.unsqueeze(-1), h_new, h)
                 self.last_mod_frac = k / T
                 self.last_mod_score = float(scores.detach().mean().item())
             else:

@@ -8,7 +8,7 @@
 | Avenue | Feature | Status | Tests run | Consec non-imp | Best result | Adopted into baseline? |
 |--------|---------|--------|-----------|----------------|-------------|------------------------|
 | RA-01 | Mixture-of-Recursions (MoR) | completed (neutral) | 3 (R1,R3,R2) | 3 (nondom) | MoR worse than ACT-halting baseline at all tested balance weights (R1 bal0.01: 2.310121@1200; R3 bal0.10: 2.316171@1050; R2 bal1.0: training collapse) | NO — MoR redundant w/ existing ACT per-token halting; baseline unchanged |
-| RA-02 | Hyperloop Multi-Stream | not-started | 0 | 0 | — | — |
+| **RA-02** | **Hyperloop Multi-Stream** | **completed (adopted-with-wins)** | **3 (R0/R1 MoD-off, R2 MoD-on)** | **0 (win)** | R2 MoD-on + HC K=4: val_bpb **2.301180** @1200 (beats MoD-on best 2.304970 by 0.0038; R1 MoD-off+HC 2.301925 beat MoD-off R0 by 0.0051); ~2.2x train time, +56% VRAM | **YES — NANO_HYPERLOOP=1 / K=4 adopted into baseline (env-carried)** |
 | RA-03 | LT2 Hybrid Attention | completed (neutral) | 2 (R1,R2) | 2 (near-null; net-neg on MoD-on) | R1 MoD-off+LT2: 2.306684@1200 (Δ-0.000295 vs R0 2.306979, late-crossover, 4.75x slower); R2 MoD-on+LT2: 2.305519@1200 (Δ+0.000549 WORSE than best 2.304970) | NO — near-null at MoD-off, net-negative on current best MoD-on; primary criteria (2.2x decode speedup, N=32768) unmeasurable in training harness (no decode bench, naive scan 4.75x slower); baseline unchanged |
 | **RA-04** | **Mixture-of-Depths (MoD)** | **completed (adopted-with-wins)** | **3** | **0 (win)** | R1+R2 cap-0.5: val_bpb **2.304970** @1200 (beats R0 2.306978 by 0.0020; exact replication; −19% train time, −18% VRAM) | **YES — NANO_MOD=1/cap 0.5 adopted into baseline (env-carried)** |
 | RA-05 | Rank-Adaptive Depth LoRA | completed (neutral) | 2 (R1,R2) | 2 (precise nulls) | R1 gamma0.1/r8: 2.304971@1200 (Δ+1e-6 vs R0 2.304970); R2 gamma0.3/r16: 2.304971@1200 (Δ+1e-6, still null) | NO — rank-adaptive depth LoRA is a precise null at 9M/1200-step scale (delta stays near-zero; train-loss tracks baseline to ~1e-4 at BOTH gamma strengths); param overhead ~1% (<5% MET) but ≥0.08-perplexity gain NOT met (large-scale uptraining artifact); baseline unchanged |
@@ -1406,3 +1406,93 @@ RA-12). Do not touch TTT avenues early.
 2. If R2 retains a clear win, adopt HC into baseline (default ON or env-carried) and
    archive run_ra02_exp.sh; else close RA-02 as mechanism-only / not adopted.
 3. After RA-02 closes: RA-07, RA-09, RA-10, RA-12 per plan Phase 3 remainder.
+
+## Session Date: 2026-10-10 — RA-02 Hyperloop Multi-Stream R2 (MoD-on + HC, closing)
+================================================================
+
+### Setup
+Continuation of the 2026-09-20 RA-02 session (R0/R1 MoD-off arm: clear signal, adoption
+pending an MoD-on R2). Daily routine session; training finished but the session was
+interrupted before recording, so results were harvested and recorded in a wrap-up pass
+the same morning. Baseline going in: **val_bpb 2.304970 @1200** (Parcae + RoPE + MoD-0.5).
+
+### Implementation (training/nano_mythos_train.py, still env-gated, default OFF)
+- Removed the RA-02 v1 ValueError guard that blocked NANO_HYPERLOOP + NANO_MOD together.
+- MoD+HC coexistence in the MoD path of RecurrentBlock.forward: when use_hyperloop,
+  compute Y_cand = HC(Y, trans_full) + B*e (Parcae e-injection written into every
+  stream, same as the full path), then Y = where(selected, Y_cand, Y) so MoD-bypassed
+  positions keep their previous Y (mirrors MoD's "bypassed tokens keep input" on h),
+  and re-fold h = Y.mean(dim=K). This removes the v1 stale-Y failure mode.
+- HC-off path (NANO_HYPERLOOP=0) is the previous code verbatim (h_new = injection(...)
+  then where(sel, h_new, h)); verified by R0 reproducing the MoD-on best to 1e-6.
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, Parcae+RoPE)
+Runner run_ra02_r2.sh (repo root). Only NANO_HYPERLOOP differs (K=4 streams).
+R0 = NANO_MOD=1, NANO_HYPERLOOP=0 (current baseline control).
+R2 = NANO_MOD=1, NANO_HYPERLOOP=1 (MoD + loop-level HC).
+
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | rhoA | MFU |
+|-----|---------|-------------|---------|--------------|-----------|------|-----|
+| R0 (MoD-on, HC-off) | 2.304969 | — | 241.3 | 895.6 | 2.06/8 | 0.957 | 38.9% |
+| R2 (MoD-on, HC K=4) | **2.301180** | **-0.003789** | 526.9 | 1396.6 | 2.99/8 | 0.950 | 17.8% |
+| ref: R0 MoD-off (09-20) | 2.306980 | +0.002011 | 329.2 | 1093.2 | 2.21/8 | 0.955 | — |
+| ref: R1 MoD-off + HC (09-20) | 2.301925 | -0.002956 | 681.9 | 1923.5 | 4.16/8 | 0.950 | 13.8% |
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.133374 | 2.821845 | 2.601109 | 2.458001 | 2.369888 | 2.324311 | 2.307420 | 2.304969 |
+| R2 | 3.135212 | 2.822784 | 2.598158 | 2.453542 | 2.365585 | 2.320333 | 2.303605 | 2.301180 |
+| R2-R0 | +0.001838 | +0.000939 | -0.002951 | -0.004459 | -0.004303 | -0.003978 | -0.003815 | **-0.003789** |
+
+Both runs 1200/1200 steps, 39.3M tokens. R2 log shows torch._dynamo
+"hit config.recompile_limit (8)" at ~step 150 (frames 2 and 6), so parts of the HC+MoD
+graph fall back to eager — a likely contributor to the 2.18x train time / MFU halving,
+not just the extra K-stream compute.
+
+### Decision: RA-02 COMPLETE — adopted-with-wins
+- **Adoption-relevant test (R2 vs current best, MoD-on both arms):** -0.003789 bpb,
+  ~1.9x the MoD adopt-win (0.0020) and far outside the seed-noise band (RA-05/RA-11
+  nulls were 1e-6; RA-03 near-null 0.0003). Early-crossover signature (worse at 150/300,
+  better from 450 and stable at -0.0038..-0.0045 through 1200), same shape as the RA-04
+  and RA-08 wins. R2 keeps ~75% of the MoD-off HC gain (-0.005055).
+- R2 is also the best result overall: beats MoD-off R1 (2.301925) by 0.000745 while
+  being cheaper than R1 (526.9s vs 681.9s, 1397MB vs 1924MB) — MoD and HC compose.
+- Plan criterion "equal loss at 50% params" is not measurable as such here (same-param
+  harness), but quality improves at +27 params (0.0003%, <3% criterion MET).
+- Cost: ~2.18x train time vs the MoD-on baseline, +56% peak VRAM, avg_loops 2.06 -> 2.99.
+  Accepted at this scale for a clear quality win; flagged for the planned 1B run.
+- 5-strike: 0 consecutive non-improving (R1 win, R2 win).
+- **Adopt into running baseline:** `NANO_HYPERLOOP=1, NANO_HYPERLOOP_STREAMS=4` ON TOP
+  of full Parcae + RoPE loop-index + MoD-0.5. Code default stays hyperloop=False
+  (avenue-gated, same as MoD/RoPE); adoption = carried via env in every future runner.
+  New Nano-Mythos validation baseline: **val_bpb 2.301180 @1200**.
+- Open threads (not avenue-blocking): (a) fix the dynamo recompile_limit hit in the
+  MoD+HC path (or raise torch._dynamo.config.recompile_limit) to recover throughput;
+  (b) input-dependent (per-token) H matrices as in the paper are a future iteration —
+  only static H was tested.
+
+### Artifacts
+- training/nano_mythos_train.py — MoD+HC coexistence path, guard removed (NANO_HYPERLOOP-gated).
+- run_ra02_r2.sh — R0/R2 MoD-on runner (repo root, not yet committed/archived);
+  run_ra02_exp.sh (R0/R1) still in repo root — move both to scripts/archive/ next session.
+- logs/ra02_{R0_mod1200,R2_modhc1200,r2_runner}.log
+- checkpoints/nano_mythos_ra02_{R0_mod1200,R2_modhc1200}.pt
+- results.tsv — RA-02 R2 block appended.
+
+### Phase B status
+Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-07, RA-09, RA-10, RA-12).
+
+### Next session
+1. Start **RA-07 (Latent CoT Supervision)** — first avenue of plan Phase 4 (RA-07,
+   RA-09, RA-10, RA-12). Paper: arXiv:2502.05171, local PDF
+   `docs/research_plan/papers/Scaling up Test-Time Compute with Latent Reasoning.pdf`.
+   Plan goal: 2x test-depth scaling; failure recovery: warm up the intermediate loss weight.
+2. Baseline MUST now include full Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4
+   (NANO_MOD=1, NANO_MOD_CAPACITY=0.5, NANO_HYPERLOOP=1, NANO_HYPERLOOP_STREAMS=4);
+   reference val_bpb 2.301180 @1200 (expect ~527s train per run). Check conflicts:
+   intermediate/per-loop supervision must read the folded h = Y.mean(dim=K), and per-loop
+   losses interact with ACT halting and MoD bypass.
+3. Housekeeping first: archive run_ra02_exp.sh + run_ra02_r2.sh to scripts/archive/;
+   consider fixing the HC+MoD dynamo recompile_limit hit before the RA-07 matched pair.
