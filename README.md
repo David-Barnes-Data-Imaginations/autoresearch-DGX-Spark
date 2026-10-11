@@ -9,7 +9,7 @@ This repository is now the **canonical master copy** of the project. (An earlier
 - [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — the original: give an AI agent a small but real LLM training setup, let it experiment autonomously overnight (5-minute budget, `val_bpb` metric), keep-or-discard.
 - **DGX Spark adaptation** — Docker-based execution with unified-memory optimizations (pinned memory, OOM protection, ARM64 support), plus venv-based training routes.
 - **OpenMythos × Keller-Jordan speedrun fusion** — Nano-Mythos validation models, looped/recurrent transformer blocks, ACT halting metrics.
-- **This repo** — diverged far enough through the research program below that it is now its own project.
+- **This repo** — diverged far enough through the research program below that it is now its own project. I've added various new research angles on the recurrent depth, then the third research group contains various compatible methods for Test Time Training / Continuous Learning. Research papers used included in the docs.
 
 ## Research goal
 
@@ -33,7 +33,7 @@ No 1B/1.5B scale-up runs without explicit owner approval.
 
 Current validation baseline: **val_bpb 2.304970 @1200 steps** (full Parcae + RoPE loop-index + MoD cap-0.5). Full history in `SESSION_NOTES.md`.
 
-## Phase A avenues — Recursive Depth Transformers
+## Phase A avenues — Recurrent-Depth Transformers
 
 - **RA-01 Mixture-of-Recursions (MoR)** — routes each token through different recursion depths via expert-choice gating with selective KV caching, so easy tokens skip loop iterations.
   Status: ✅ completed, neutral — redundant with the existing ACT per-token halting; not adopted.

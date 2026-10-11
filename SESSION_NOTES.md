@@ -13,7 +13,7 @@
 | **RA-04** | **Mixture-of-Depths (MoD)** | **completed (adopted-with-wins)** | **3** | **0 (win)** | R1+R2 cap-0.5: val_bpb **2.304970** @1200 (beats R0 2.306978 by 0.0020; exact replication; −19% train time, −18% VRAM) | **YES — NANO_MOD=1/cap 0.5 adopted into baseline (env-carried)** |
 | RA-05 | Rank-Adaptive Depth LoRA | completed (neutral) | 2 (R1,R2) | 2 (precise nulls) | R1 gamma0.1/r8: 2.304971@1200 (Δ+1e-6 vs R0 2.304970); R2 gamma0.3/r16: 2.304971@1200 (Δ+1e-6, still null) | NO — rank-adaptive depth LoRA is a precise null at 9M/1200-step scale (delta stays near-zero; train-loss tracks baseline to ~1e-4 at BOTH gamma strengths); param overhead ~1% (<5% MET) but ≥0.08-perplexity gain NOT met (large-scale uptraining artifact); baseline unchanged |
 | **RA-06** | **Parcae LTI Stability** | **completed (adopted-with-wins)** | **6** | **0 (win)** | ρ(A) pinned 0.950, val_bpb 2.559975 @800 (beats baseline 2.566979 by 0.0070) | **YES — full Parcae (init + e-norm + depth sample) adopted into baseline** |
-| RA-07 | Latent CoT Supervision | not-started | 0 | 0 | — | — |
+| RA-07 | Latent CoT Supervision | in-progress (1/5) | 1 (R0/R1) | 1 (near-null) | R1 latent: 2.300742@1200 (Δ−0.000455 vs R0 2.301197); warmup=2000 > steps=1200 so aux never fully engaged | NO (pending failure-recovery retry with shorter warmup) |
 | **RA-08** | **RoPE Loop-Index Embedding** | **completed (adopted-with-wins)** | **5** | **0 (win)** | val_bpb 2.306980 @1200 (beats full-Parcae baseline 2.314457 by 0.0075; gap compounds 800->1200) | **YES — NANO_ROPE_LOOP=1 adopted into baseline** |
 | RA-09 | Dynamic ACT Ponder Loss | not-started | 0 | 0 | — | — |
 | RA-10 | Continuous Latent Beam Search | not-started | 0 | 0 | — | — |
@@ -1496,3 +1496,72 @@ Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-07, RA-09, RA-10, RA-
    losses interact with ACT halting and MoD bypass.
 3. Housekeeping first: archive run_ra02_exp.sh + run_ra02_r2.sh to scripts/archive/;
    consider fixing the HC+MoD dynamo recompile_limit hit before the RA-07 matched pair.
+
+## Session Date: 2026-10-11 — RA-07 Latent CoT Supervision (matched pair)
+
+### Setup
+Daily session continued from the 2026-10-10 Next session pointer: start RA-07 (Latent
+CoT / intermediate loop supervision, Geiping et al. arXiv:2502.05171). Baseline now
+includes full Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (reference 2.301180 @1200).
+
+### Paper
+Local PDF: `docs/research_plan/papers/Scaling up Test-Time Compute with Latent Reasoning.pdf`.
+Plan goal: 2x test-depth scaling via aux CE on intermediate loop states; failure recovery:
+warm up the intermediate loss weight.
+
+### Implementation (training/nano_mythos_train.py, env-gated, default OFF)
+- `latent_cot` / `NANO_LATENT_COT`: snapshot folded h after each completed loop; aux CE
+  through shared coda+head on intermediate states (t in {2,4,6} schedule in runner notes).
+- `NANO_LATENT_AUX_WEIGHT` default 0.1; `NANO_LATENT_WARMUP_STEPS` default 2000
+  (lambda scales as min(1, step/warmup) * aux_weight).
+- HC path: intermediate snapshots use folded h = Y.mean(dim=K); MoD bypass unchanged.
+- Runner: `run_ra07_exp.sh` (repo root). Only NANO_LATENT_COT differs between arms.
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
+R0 = NANO_LATENT_COT=0 (adopted baseline control).
+R1 = NANO_LATENT_COT=1, aux_w=0.1, warmup=2000.
+
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | MFU |
+|-----|---------|-------------|---------|--------------|-----------|-----|
+| R0 (latent OFF) | 2.301197 | — | 526.3 | 1396.6 | 3.00/8 | 17.8% |
+| R1 (latent ON) | 2.300742 | **−0.000455** | 757.0 | 2250.4 | 3.05/8 | 12.4% |
+| ref: RA-02 R2 baseline | 2.301180 | −0.000017 | 526.9 | 1396.6 | 2.99/8 | 17.8% |
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.135213 | 2.822787 | 2.598174 | 2.453550 | 2.365601 | 2.320354 | 2.303618 | 2.301197 |
+| R1 | 3.135192 | 2.822830 | 2.597958 | 2.453166 | 2.365149 | 2.319891 | 2.303168 | 2.300742 |
+| R1−R0 | −0.000021 | +0.000043 | −0.000216 | −0.000384 | −0.000452 | −0.000463 | −0.000450 | **−0.000455** |
+
+Both runs 1200/1200 steps, 39.3M tokens. R0 reproduces the adopted HC baseline to ~1.7e−5.
+
+### Decision: RA-07 NEAR-NULL on this schedule — not adopted (retry pending)
+- Δ−0.000455 is in the RA-03 near-null band (~0.0003), far below adopt-wins (MoD −0.0020,
+  Hyperloop −0.0038). Curve is flat-tiny from step 600; no early-crossover signature.
+- **Confound:** `NANO_LATENT_WARMUP_STEPS=2000` with `NANO_MAX_STEPS=1200` means the aux
+  weight never reaches full strength (at most 1200/2000 of the scheduled lambda). This is
+  the plan's named failure-recovery knob used backwards for a 1200-step harness.
+- Cost: ~1.44x train time, +61% peak VRAM, MFU 17.8%→12.4%. Not justified by a near-null.
+- 5-strike: 1 consecutive non-improving. Baseline unchanged at **2.301180 @1200**
+  (env-carried Parcae+RoPE+MoD+HC); code default stays `latent_cot=False`.
+- Do **not** archive the avenue yet: one failure-recovery retry with shorter warmup first.
+
+### Artifacts
+- training/nano_mythos_train.py — Latent CoT path (NANO_LATENT_COT-gated).
+- run_ra07_exp.sh — R0/R1 matched runner (repo root).
+- logs/ra07_{R0_baseline1200,R1_latent1200,runner,smoke}.log
+- checkpoints/nano_mythos_ra07_{R0_baseline1200,R1_latent1200}.pt
+- results.tsv — RA-07 R0/R1 block appended.
+
+### Phase B status
+Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-07 retry, RA-09, RA-10, RA-12).
+
+### Next session
+1. **RA-07 failure-recovery retry:** same matched pair with
+   `NANO_LATENT_WARMUP_STEPS=200` (and keep aux_w=0.1) so the aux fully engages inside
+   1200 steps. If still |Δ|≲0.0005: mark RA-07 completed-neutral, archive
+   `run_ra07_exp.sh` → `scripts/archive/`, advance to **RA-09 (Dynamic ACT Ponder Loss)**.
+2. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+3. Optional housekeeping if time: dynamo `recompile_limit` on HC+MoD path (throughput only).

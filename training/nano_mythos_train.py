@@ -88,6 +88,10 @@ class NanoMythosConfig:
     # --- RA-02: Hyperloop Multi-Stream (Hyperloop Transformers, Zeitoun et al.) ---
     hyperloop: bool = False            # matrix-valued residual over K hyper-streams (loop-level mHC)
     hyperloop_streams: int = 4         # K: number of parallel residual streams (paper: 4)
+    # --- RA-07: Latent CoT / intermediate loop supervision (Geiping et al.) ---
+    latent_cot: bool = False           # aux CE on intermediate loop states via shared coda+head
+    latent_aux_weight: float = 0.1     # base lambda scale; per-t weight = aux * (t / T)
+    latent_warmup_steps: int = 2000    # linear warmup of aux weight (plan failure mitigation)
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +658,9 @@ class RecurrentBlock(nn.Module):
         # HC update is applied only to selected positions; bypassed positions
         # keep their previous Y (mirrors MoD "keep input" on h). This prevents
         # the v1 stale-Y failure mode where HC was only wired into the full path.
+        # RA-07: intermediate loop states for latent CoT aux CE (folded h if HC).
+        self.latent_cot = bool(cfg.latent_cot)
+        self.last_latent_hs = None  # list[(t_1idx:int, h:Tensor)] or None
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -715,6 +722,8 @@ class RecurrentBlock(nn.Module):
         prev_k = None
         prev_v = None
         self.last_kv_alpha = None
+        # RA-07: clear intermediate snapshots each forward
+        self.last_latent_hs = None
 
         # RA-02: seed the K-stream matrix residual by broadcasting h across K
         # (paper: 'expand by copying n times'). Stream 0 carries the state;
@@ -829,6 +838,18 @@ class RecurrentBlock(nn.Module):
                 else:
                     h = self.injection(h, e, trans_out)
 
+            # RA-07: snapshot folded h after completing loop (t+1) for aux CE.
+            # Targets = {T/4, T/2, 3T/4} (1-indexed), matching plan scaled to T.
+            # Read the current h (HC path already folds Y.mean); keep graph.
+            if self.latent_cot:
+                t1 = t + 1
+                Tmax = int(n_loops)
+                targets_t = {max(1, Tmax // 4), max(1, Tmax // 2), max(1, (3 * Tmax) // 4)}
+                if t1 in targets_t:
+                    if self.last_latent_hs is None:
+                        self.last_latent_hs = []
+                    self.last_latent_hs.append((t1, h.clone()))
+
             if use_mor:
                 # RA-01 token-choice: a token's final active loop is t where
                 # depths == t+1. Its h_out is simply its state at that loop
@@ -907,6 +928,9 @@ class NanoMythos(nn.Module):
         self.norm = RMSNorm(cfg.dim)
         self.head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         self.head.weight = self.embed.weight  # weight tying
+        # RA-07: warmup scalar updated each training step (tensor so torch.compile
+        # does not specialize/recompile on a changing Python int attribute).
+        self.register_buffer("_latent_warm", torch.zeros((), dtype=torch.float32), persistent=False)
 
         self._init_weights()
 
@@ -965,6 +989,29 @@ class NanoMythos(nn.Module):
             _dep = getattr(self.recurrent, "last_mor_depth", None)
             if self.cfg.mor and self.training and _bal is not None and reduction == "mean":
                 loss = loss + _bal + self.cfg.mor_aux_weight * _dep
+            # RA-07: latent CoT aux CE on intermediate loop states via shared coda+head.
+            # Training-only; eval path unchanged so val_bpb stays comparable.
+            _lat = getattr(self.recurrent, "last_latent_hs", None)
+            if (self.cfg.latent_cot and self.training and _lat and reduction == "mean"):
+                Tmax = float(self.cfg.max_loop_iters)
+                warm = self._latent_warm  # 0-dim tensor, updated outside compile graph
+                aux_sum = logits.new_zeros(())
+                for t1, h_t in _lat:
+                    x_t = h_t
+                    for layer in self.coda:
+                        x_t = layer(x_t, freqs_cis, mask)
+                    logits_t = self.head(self.norm(x_t)).float()
+                    logits_t = softcap * torch.tanh(logits_t / softcap)
+                    loss_t = F.cross_entropy(
+                        logits_t.view(-1, logits_t.size(-1)),
+                        targets.view(-1),
+                        ignore_index=-1,
+                        reduction=reduction,
+                    )
+                    lam = self.cfg.latent_aux_weight * (float(t1) / Tmax) * warm
+                    aux_sum = aux_sum + lam * loss_t
+                loss = loss + aux_sum
+                self.last_latent_aux = aux_sum.detach()
             return loss
         return logits
 
@@ -1062,6 +1109,10 @@ RAD_GAMMA = _env_float("NANO_RAD_GAMMA", 0.1)
 # RA-02: Hyperloop Multi-Stream (Hyperloop Transformers, loop-level mHC)
 HYPERLOOP = _env_bool("NANO_HYPERLOOP", False)
 HYPERLOOP_STREAMS = _env_int("NANO_HYPERLOOP_STREAMS", 4)
+# RA-07: Latent CoT intermediate supervision
+LATENT_COT = _env_bool("NANO_LATENT_COT", False)
+LATENT_AUX_WEIGHT = _env_float("NANO_LATENT_AUX_WEIGHT", 0.1)
+LATENT_WARMUP_STEPS = _env_int("NANO_LATENT_WARMUP_STEPS", 2000)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -1077,7 +1128,9 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"mod={MOD} mod_cap={MOD_CAPACITY} mod_noise={MOD_NOISE} "
       f"kv_recycle={KV_RECYCLE} kv_alpha={KV_ALPHA} kv_dynamic={KV_DYNAMIC} "
       f"lt2={LT2} rad_lo={RAD_LO} rad_r0={RAD_BASE_RANK} rad_rs={RAD_RANK_STEP} "
-      f"rad_gamma={RAD_GAMMA} hyperloop={HYPERLOOP} hyperloop_K={HYPERLOOP_STREAMS} tag={CKPT_TAG}")
+      f"rad_gamma={RAD_GAMMA} hyperloop={HYPERLOOP} hyperloop_K={HYPERLOOP_STREAMS} "
+      f"latent_cot={LATENT_COT} latent_aux_w={LATENT_AUX_WEIGHT} "
+      f"latent_warm={LATENT_WARMUP_STEPS} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1184,9 @@ cfg = NanoMythosConfig(
     rad_gamma=RAD_GAMMA,
     hyperloop=HYPERLOOP,
     hyperloop_streams=HYPERLOOP_STREAMS,
+    latent_cot=LATENT_COT,
+    latent_aux_weight=LATENT_AUX_WEIGHT,
+    latent_warmup_steps=LATENT_WARMUP_STEPS,
 )
 
 with torch.device("meta"):
@@ -1234,6 +1290,10 @@ while True:
         _seq_depths = torch.poisson(cfg.max_loop_iters * torch.ones(x.shape[0])).long().clamp(min=1)
     else:
         _seq_depths = None
+    # RA-07: update aux-loss warmup scalar (outside compiled graph)
+    if cfg.latent_cot:
+        _w = 1.0 if cfg.latent_warmup_steps <= 0 else min(1.0, float(step) / float(cfg.latent_warmup_steps))
+        model._latent_warm.fill_(_w)
     for micro_step in range(grad_accum_steps):
         try:
             with autocast_ctx:

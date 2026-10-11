@@ -90,3 +90,12 @@ Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status,
 2026-10-10, ra02_R0_mod1200,     2.304969, 1200, 0.957, 2.06, 895.6, reference, MoD-on/HC-off control (Parcae+RoPE+MoD-0.5 = adopted baseline) — reproduces RA-04 best 2.304970 to 1e-6; confirms R2 coexistence patch bit-consistent on HC-off path; train 241.3s
 2026-10-10, ra02_R2_modhc1200,   2.301180, 1200, 0.950, 2.99, 1396.6, ADOPT, MoD-on + loop-level HC K=4 (MoD+HC coexistence: HC applied to selected tokens, bypassed tokens keep previous Y) — Delta-0.003789 vs R0 (~1.9x the MoD adopt-win 0.0020); also beats MoD-off R1 2.301925 by 0.000745 at lower cost; worse only at step 150/300, better from 450 on; train 526.9s (~2.18x), VRAM +56%, avg_loops 2.06->2.99, MFU 38.9%->17.8% (dynamo recompile_limit hit, part of slowdown); +27 params
 2026-10-10, ra02_CONCLUSION,     n/a, -, -, -, -, ADOPTED, RA-02 complete-adopted. Hyperloop loop-level HC retains its win under MoD-on (R2 keeps ~75% of the MoD-off Delta). NANO_HYPERLOOP=1 (K=4) env-carried into baseline alongside Parcae+RoPE+MoD-0.5. New baseline val_bpb 2.301180@1200. Cost: ~2.2x train time, +56% VRAM. Next: RA-07 Latent CoT Supervision (Phase 4).
+
+================================================================
+RA-07 Latent CoT Supervision — Nano-Mythos validation (2026-10-11)
+================================================================
+Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status, description
+
+2026-10-11, ra07_R0_baseline1200, 2.301197, 1200, 0.950, 3.00, 1396.6, reference, Latent OFF control on adopted baseline (Parcae+RoPE+MoD-0.5+HC K=4) — reproduces RA-02 R2 2.301180 to ~1.7e-5; train 526.3s, MFU 17.8%
+2026-10-11, ra07_R1_latent1200,   2.300742, 1200, 0.950, 3.05, 2250.4, near-null, Latent CoT aux ON (aux_w=0.1, warmup=2000) — Delta-0.000455 vs R0 (near-null band); train 757.0s (~1.44x), VRAM +61%, MFU 12.4%; warmup>steps so aux never fully engaged
+2026-10-11, ra07_NOTE,            n/a, -, -, -, -, PENDING-RETRY, RA-07 first matched pair near-null under mis-scaled warmup. Failure-recovery next: warmup=200 inside 1200-step harness. Baseline unchanged at 2.301180@1200. Do not adopt yet.
