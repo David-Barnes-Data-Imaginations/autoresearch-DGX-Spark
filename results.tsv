@@ -99,3 +99,12 @@ Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status,
 2026-10-11, ra07_R0_baseline1200, 2.301197, 1200, 0.950, 3.00, 1396.6, reference, Latent OFF control on adopted baseline (Parcae+RoPE+MoD-0.5+HC K=4) — reproduces RA-02 R2 2.301180 to ~1.7e-5; train 526.3s, MFU 17.8%
 2026-10-11, ra07_R1_latent1200,   2.300742, 1200, 0.950, 3.05, 2250.4, near-null, Latent CoT aux ON (aux_w=0.1, warmup=2000) — Delta-0.000455 vs R0 (near-null band); train 757.0s (~1.44x), VRAM +61%, MFU 12.4%; warmup>steps so aux never fully engaged
 2026-10-11, ra07_NOTE,            n/a, -, -, -, -, PENDING-RETRY, RA-07 first matched pair near-null under mis-scaled warmup. Failure-recovery next: warmup=200 inside 1200-step harness. Baseline unchanged at 2.301180@1200. Do not adopt yet.
+
+================================================================
+RA-07 Latent CoT Supervision — failure-recovery retry warmup=200 (2026-10-12)
+================================================================
+Columns: date, tag, val_bpb, steps, rhoA_final, avg_loops, peak_vram_mb, status, description
+
+2026-10-12, ra07_R0_w200_baseline1200, 2.301182, 1200, 0.950, 3.04, 1396.6, reference, Latent OFF control on adopted baseline (Parcae+RoPE+MoD-0.5+HC K=4) — reproduces RA-02 R2 2.301180 to ~2e-6; train 539.9s, MFU 17.4%
+2026-10-12, ra07_R1_w200_latent1200,   2.300548, 1200, 0.950, 4.44, 2250.4, near-null, Latent CoT aux ON (aux_w=0.1, warmup=200) — Delta-0.000634 vs R0 (still near-null after full aux engagement); train 818.8s (~1.52x), VRAM +61%, MFU 11.5%; avg_loops 3.04->4.44
+2026-10-12, ra07_CONCLUSION,           n/a, -, -, -, -, COMPLETED-NEUTRAL, RA-07 closed after failure-recovery retry. Both matched pairs near-null (−0.000455 then −0.000634). Not adopted. Baseline unchanged at 2.301180@1200. Next: archive RA-07 runners, start RA-09 Dynamic ACT Ponder Loss.

@@ -1565,3 +1565,67 @@ Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-07 retry, RA-09, RA-1
    `run_ra07_exp.sh` → `scripts/archive/`, advance to **RA-09 (Dynamic ACT Ponder Loss)**.
 2. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
 3. Optional housekeeping if time: dynamo `recompile_limit` on HC+MoD path (throughput only).
+
+
+## Session Date: 2026-10-12 — RA-07 Latent CoT failure-recovery retry (warmup=200)
+
+### Setup
+Daily session continued from the 2026-10-11 Next session pointer: RA-07 failure-recovery
+retry with `NANO_LATENT_WARMUP_STEPS=200` so aux fully engages inside the 1200-step harness
+(first pair used warmup=2000 and never reached full strength). Baseline unchanged:
+Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+
+### Paper
+Same as 2026-10-11: Geiping et al. arXiv:2502.05171, local PDF
+`docs/research_plan/papers/Scaling up Test-Time Compute with Latent Reasoning.pdf`.
+
+### Implementation
+No code change. Runner: `run_ra07_retry.sh` (repo root) — same matched pair as
+`run_ra07_exp.sh` but `NANO_LATENT_WARMUP_STEPS=200` on R1 (aux_w=0.1 kept).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
+R0 = NANO_LATENT_COT=0 (adopted baseline control).
+R1 = NANO_LATENT_COT=1, aux_w=0.1, warmup=200.
+
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | MFU |
+|-----|---------|-------------|---------|--------------|-----------|-----|
+| R0 (latent OFF) | 2.301182 | — | 539.9 | 1396.6 | 3.04/8 | 17.4% |
+| R1 (latent ON, w=200) | 2.300548 | **−0.000634** | 818.8 | 2250.4 | 4.44/8 | 11.5% |
+| ref: RA-02 R2 baseline | 2.301180 | −0.000002 | 526.9 | 1396.6 | 2.99/8 | 17.8% |
+| prior R1 (w=2000) | 2.300742 | −0.000455 vs prior R0 | 757.0 | 2250.4 | 3.05/8 | 12.4% |
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.135213 | 2.822785 | 2.598197 | 2.453536 | 2.365571 | 2.320329 | 2.303602 | 2.301182 |
+| R1 | 3.134926 | 2.821685 | 2.597378 | 2.452864 | 2.364849 | 2.319654 | 2.302970 | 2.300548 |
+| R1−R0 | −0.000287 | −0.001100 | −0.000819 | −0.000672 | −0.000722 | −0.000675 | −0.000632 | **−0.000634** |
+
+Both runs 1200/1200 steps, 39.3M tokens. R0 reproduces the adopted HC baseline to ~2e−6.
+Warmup=200 reaches full aux strength by step 200 (confirmed intent of this retry).
+
+### Decision: RA-07 COMPLETED-NEUTRAL — not adopted
+- Δ−0.000634 remains in the near-null band (first pair −0.000455; retry slightly larger
+  but still ≪ adopt-wins MoD −0.0020 / Hyperloop −0.0038). No crossover to a real win.
+- Failure-recovery knob used correctly; aux fully engaged; still no signal worth the cost
+  (~1.52x train time, +61% peak VRAM, MFU 17.4%→11.5%; R1 avg_loops rose 3.04→4.44).
+- 5-strike: 2 consecutive non-improving. Baseline unchanged at **2.301180 @1200**
+  (env-carried Parcae+RoPE+MoD+HC); code default stays `latent_cot=False`.
+- Avenue closed: archive `run_ra07_exp.sh` + `run_ra07_retry.sh` → `scripts/archive/`
+  next session (or immediately if housekeeping), then advance to **RA-09**.
+
+### Artifacts
+- run_ra07_retry.sh — warmup=200 matched runner (repo root; archive pending).
+- logs/ra07_{R0_w200_baseline1200,R1_w200_latent1200,retry_runner}.log
+- checkpoints/nano_mythos_ra07_{R0_w200_baseline1200,R1_w200_latent1200}.pt
+- results.tsv — RA-07 retry R0/R1 block appended.
+
+### Phase B status
+Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-09, RA-10, RA-12).
+
+### Next session
+1. Archive `run_ra07_exp.sh` + `run_ra07_retry.sh` → `scripts/archive/`.
+2. Start **RA-09 (Dynamic ACT Ponder Loss)** — next Phase 4 avenue after RA-07 closed.
+3. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+4. Optional: dynamo `recompile_limit` on HC+MoD path (throughput only).
