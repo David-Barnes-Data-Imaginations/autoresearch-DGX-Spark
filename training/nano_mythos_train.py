@@ -92,6 +92,10 @@ class NanoMythosConfig:
     latent_cot: bool = False           # aux CE on intermediate loop states via shared coda+head
     latent_aux_weight: float = 0.1     # base lambda scale; per-t weight = aux * (t / T)
     latent_warmup_steps: int = 2000    # linear warmup of aux weight (plan failure mitigation)
+    # --- RA-09: Dynamic ACT Ponder Loss (Universal Transformers / Graves ACT) ---
+    act_ponder: bool = False           # add tau * mean(N + R) ponder cost to the training loss
+    ponder_tau: float = 0.001          # plan default tau
+    ponder_warmup_steps: int = 0       # linear tau anneal 0->tau (plan failure mitigation); 0 = off
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +665,9 @@ class RecurrentBlock(nn.Module):
         # RA-07: intermediate loop states for latent CoT aux CE (folded h if HC).
         self.latent_cot = bool(cfg.latent_cot)
         self.last_latent_hs = None  # list[(t_1idx:int, h:Tensor)] or None
+        # RA-09: per-token ponder cost N + R (Graves ACT); ACT branch only.
+        self.act_ponder = bool(cfg.act_ponder)
+        self.last_ponder = None     # scalar tensor mean(N+R) over (B,T), keeps graph via R
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -724,6 +731,13 @@ class RecurrentBlock(nn.Module):
         self.last_kv_alpha = None
         # RA-07: clear intermediate snapshots each forward
         self.last_latent_hs = None
+        # RA-09: ponder accumulators. N = loops a position was active (non-diff);
+        # R = remainder mass assigned at halt / depth-completion (differentiable).
+        self.last_ponder = None
+        use_ponder = self.act_ponder and not use_mor
+        if use_ponder:
+            ponder_N = torch.zeros(B, T, device=h.device, dtype=torch.float32)
+            ponder_R = torch.zeros(B, T, device=h.device, dtype=torch.float32)
 
         # RA-02: seed the K-stream matrix residual by broadcasting h across K
         # (paper: 'expand by copying n times'). Stream 0 carries the state;
@@ -873,6 +887,12 @@ class RecurrentBlock(nn.Module):
                     p,
                 )
                 weight = weight * still_running.float()
+                if use_ponder:
+                    # RA-09: N += active; R += remainder at the halting step.
+                    _sr = still_running.float()
+                    ponder_N = ponder_N + _sr
+                    _newly = still_running & (cumulative_p + p >= self.cfg.act_threshold)
+                    ponder_R = ponder_R + remainder.float() * _newly.float()
                 h_out = h_out + weight.unsqueeze(-1) * h
 
                 cumulative_p = cumulative_p + p * still_running.float()
@@ -886,6 +906,8 @@ class RecurrentBlock(nn.Module):
                 if finished_at_t.any():
                     completion_mask = finished_at_t & ~halted  # exclude ACT-halted
                     completion_weight = ((1.0 - cumulative_p).clamp(min=0)) * completion_mask.float()
+                    if use_ponder:
+                        ponder_R = ponder_R + completion_weight.float()
                     h_out = h_out + completion_weight.unsqueeze(-1) * h
 
                 # Track how many positions used this loop iteration
@@ -899,6 +921,8 @@ class RecurrentBlock(nn.Module):
         avg_loops = loops_used_sum / max(1, total_positions) if loops_used_sum > 0 else float(n_loops)
         self.last_avg_loops = avg_loops  # store for logging
         self.last_avg_depth = float(seq_depths.float().mean().item())  # RA-06: mean sampled depth
+        if use_ponder:
+            self.last_ponder = (ponder_N + ponder_R).mean()  # RA-09
         return h_out
 
 
@@ -931,6 +955,8 @@ class NanoMythos(nn.Module):
         # RA-07: warmup scalar updated each training step (tensor so torch.compile
         # does not specialize/recompile on a changing Python int attribute).
         self.register_buffer("_latent_warm", torch.zeros((), dtype=torch.float32), persistent=False)
+        # RA-09: ponder tau anneal scalar (tensor, updated outside compiled graph)
+        self.register_buffer("_ponder_warm", torch.ones((), dtype=torch.float32), persistent=False)
 
         self._init_weights()
 
@@ -1012,6 +1038,10 @@ class NanoMythos(nn.Module):
                     aux_sum = aux_sum + lam * loss_t
                 loss = loss + aux_sum
                 self.last_latent_aux = aux_sum.detach()
+            # RA-09: ACT ponder cost tau * mean(N + R). Training-only; eval unchanged.
+            _pc = getattr(self.recurrent, "last_ponder", None)
+            if (self.cfg.act_ponder and self.training and _pc is not None and reduction == "mean"):
+                loss = loss + self.cfg.ponder_tau * self._ponder_warm * _pc
             return loss
         return logits
 
@@ -1113,6 +1143,10 @@ HYPERLOOP_STREAMS = _env_int("NANO_HYPERLOOP_STREAMS", 4)
 LATENT_COT = _env_bool("NANO_LATENT_COT", False)
 LATENT_AUX_WEIGHT = _env_float("NANO_LATENT_AUX_WEIGHT", 0.1)
 LATENT_WARMUP_STEPS = _env_int("NANO_LATENT_WARMUP_STEPS", 2000)
+# RA-09: Dynamic ACT Ponder Loss
+ACT_PONDER = _env_bool("NANO_ACT_PONDER", False)
+PONDER_TAU = _env_float("NANO_PONDER_TAU", 0.001)
+PONDER_WARMUP_STEPS = _env_int("NANO_PONDER_WARMUP_STEPS", 0)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -1130,7 +1164,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"lt2={LT2} rad_lo={RAD_LO} rad_r0={RAD_BASE_RANK} rad_rs={RAD_RANK_STEP} "
       f"rad_gamma={RAD_GAMMA} hyperloop={HYPERLOOP} hyperloop_K={HYPERLOOP_STREAMS} "
       f"latent_cot={LATENT_COT} latent_aux_w={LATENT_AUX_WEIGHT} "
-      f"latent_warm={LATENT_WARMUP_STEPS} tag={CKPT_TAG}")
+      f"latent_warm={LATENT_WARMUP_STEPS} act_ponder={ACT_PONDER} ponder_tau={PONDER_TAU} "
+      f"ponder_warm={PONDER_WARMUP_STEPS} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1222,9 @@ cfg = NanoMythosConfig(
     latent_cot=LATENT_COT,
     latent_aux_weight=LATENT_AUX_WEIGHT,
     latent_warmup_steps=LATENT_WARMUP_STEPS,
+    act_ponder=ACT_PONDER,
+    ponder_tau=PONDER_TAU,
+    ponder_warmup_steps=PONDER_WARMUP_STEPS,
 )
 
 with torch.device("meta"):
@@ -1294,6 +1332,10 @@ while True:
     if cfg.latent_cot:
         _w = 1.0 if cfg.latent_warmup_steps <= 0 else min(1.0, float(step) / float(cfg.latent_warmup_steps))
         model._latent_warm.fill_(_w)
+    # RA-09: ponder tau anneal scalar (outside compiled graph)
+    if cfg.act_ponder:
+        _pw = 1.0 if cfg.ponder_warmup_steps <= 0 else min(1.0, float(step) / float(cfg.ponder_warmup_steps))
+        model._ponder_warm.fill_(_pw)
     for micro_step in range(grad_accum_steps):
         try:
             with autocast_ctx:
@@ -1363,11 +1405,14 @@ while True:
         _msc = getattr(model.recurrent, "last_mod_score", None)
         _mod_str = f" | mod[{_mod_frac:.2f} s:{_msc:.3f}]" if _msc is not None else f" | mod[{_mod_frac:.2f}]"
 
+    # RA-09: ponder cost mean(N+R) of the last micro-step
+    _pond = getattr(model.recurrent, "last_ponder", None)
+    _pond_str = f" | ponder[{_pond.item():.2f}]" if (cfg.act_ponder and _pond is not None) else ""
     print(
         f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lr: {lr:.6f} | "
         f"dt: {dt*1000:.0f}ms | tok/s: {tok_per_sec:,} | mfu: {mfu:.1f}% | "
         f"avg_loops: {avg_loops:.1f}/{cfg.max_loop_iters} | avg_depth: {avg_depth:.1f} | rhoA: {rho_A:.3f} | "
-        f"epoch: {epoch}{_mor_str}{_mod_str} | remaining: {remaining:.0f}s",
+        f"epoch: {epoch}{_mor_str}{_mod_str}{_pond_str} | remaining: {remaining:.0f}s",
         end="",
         flush=True,
     )

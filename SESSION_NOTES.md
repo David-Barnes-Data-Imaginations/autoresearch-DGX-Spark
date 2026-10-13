@@ -13,9 +13,9 @@
 | **RA-04** | **Mixture-of-Depths (MoD)** | **completed (adopted-with-wins)** | **3** | **0 (win)** | R1+R2 cap-0.5: val_bpb **2.304970** @1200 (beats R0 2.306978 by 0.0020; exact replication; −19% train time, −18% VRAM) | **YES — NANO_MOD=1/cap 0.5 adopted into baseline (env-carried)** |
 | RA-05 | Rank-Adaptive Depth LoRA | completed (neutral) | 2 (R1,R2) | 2 (precise nulls) | R1 gamma0.1/r8: 2.304971@1200 (Δ+1e-6 vs R0 2.304970); R2 gamma0.3/r16: 2.304971@1200 (Δ+1e-6, still null) | NO — rank-adaptive depth LoRA is a precise null at 9M/1200-step scale (delta stays near-zero; train-loss tracks baseline to ~1e-4 at BOTH gamma strengths); param overhead ~1% (<5% MET) but ≥0.08-perplexity gain NOT met (large-scale uptraining artifact); baseline unchanged |
 | **RA-06** | **Parcae LTI Stability** | **completed (adopted-with-wins)** | **6** | **0 (win)** | ρ(A) pinned 0.950, val_bpb 2.559975 @800 (beats baseline 2.566979 by 0.0070) | **YES — full Parcae (init + e-norm + depth sample) adopted into baseline** |
-| RA-07 | Latent CoT Supervision | in-progress (1/5) | 1 (R0/R1) | 1 (near-null) | R1 latent: 2.300742@1200 (Δ−0.000455 vs R0 2.301197); warmup=2000 > steps=1200 so aux never fully engaged | NO (pending failure-recovery retry with shorter warmup) |
+| RA-07 | Latent CoT Supervision | completed (neutral) | 2 (R0/R1 w2000, R0/R1 w200) | 2 (near-null) | R1 w200: 2.300548@1200 (Δ−0.000634 vs R0 2.301182); first pair Δ−0.000455; ~1.5x train time, +61% VRAM | NO — near-null after failure-recovery retry; baseline unchanged |
 | **RA-08** | **RoPE Loop-Index Embedding** | **completed (adopted-with-wins)** | **5** | **0 (win)** | val_bpb 2.306980 @1200 (beats full-Parcae baseline 2.314457 by 0.0075; gap compounds 800->1200) | **YES — NANO_ROPE_LOOP=1 adopted into baseline** |
-| RA-09 | Dynamic ACT Ponder Loss | not-started | 0 | 0 | — | — |
+| RA-09 | Dynamic ACT Ponder Loss | in-progress (R0/R1 launched 2026-10-13) | 0 | 0 | — (pending) | — |
 | RA-10 | Continuous Latent Beam Search | not-started | 0 | 0 | — | — |
 | RA-11 | Recycled KV Memory | completed (neutral) | 2 (R0,R1) | 1 (precise null) | R1 recycle-a0.7-dyn: val_bpb 2.304971@1200 (Delta+1e-6 vs R0 2.304970; 7/8 eval ckpts bit-identical) | NO — quality-neutral by construction; baseline unchanged |
 | RA-12 | Nanbeige 3B Compact MoE | not-started | 0 | 0 | — | — |
@@ -1629,3 +1629,43 @@ Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-09, RA-10, RA-12).
 2. Start **RA-09 (Dynamic ACT Ponder Loss)** — next Phase 4 avenue after RA-07 closed.
 3. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
 4. Optional: dynamo `recompile_limit` on HC+MoD path (throughput only).
+
+
+## Session Date: 2026-10-13 — RA-09 Dynamic ACT Ponder Loss (launch)
+
+### Setup
+Daily session from the 2026-10-12 Next session pointer. RA-07 runners already archived in
+`scripts/archive/` (commit 47553a2). Advanced to **RA-09 (Dynamic ACT Ponder Loss)**.
+Baseline unchanged: Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle before launch.
+
+### Paper
+Dehghani et al., *Universal Transformers* (arXiv:1807.03819) / Graves ACT ponder cost;
+plan: `docs/research_plan/recursion_research_plan.md` Research Avenue 9.
+
+### Implementation
+`training/nano_mythos_train.py`, env-gated, default OFF (`NANO_ACT_PONDER=0`):
+- The baseline `ACTHalting` + remainder trick already matches the plan's `DynamicACTHalting`
+  (threshold 0.99), so RA-09 = adding the ponder cost on top of it.
+- RecurrentBlock (ACT branch only, not MoR): per-position N = loops active (non-diff),
+  R = remainder mass assigned at the halting step, or the RA-06 depth-completion remainder
+  (differentiable via earlier halting probs). `last_ponder = mean(N + R)`.
+- Loss (training only, eval/val_bpb unchanged): `loss += NANO_PONDER_TAU * warm * mean(N+R)`,
+  tau=0.001 (plan default). `NANO_PONDER_WARMUP_STEPS` (default 0) = linear tau anneal for
+  the plan's failure mitigation (all-halt-at-step-1 collapse); tensor buffer `_ponder_warm`
+  is updated outside the compiled graph (same pattern as RA-07).
+- Step log gains `ponder[x.xx]` when enabled.
+- Smoke (30 steps, HC+MoD baseline env, ponder ON): no crash, ponder ≈2.56 (avg_loops 2.2/8).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
+Runner: `run_ra09_exp.sh` (repo root). R0 = `NANO_ACT_PONDER=0`; R1 = `NANO_ACT_PONDER=1`,
+tau=0.001, no anneal. Only `NANO_ACT_PONDER` differs. Logs: `logs/ra09_runner.log`,
+`logs/ra09_{R0_baseline1200,R1_ponder1200}.log`. Results pending (wrap-up records them).
+
+### Next session
+1. Record RA-09 R0/R1 results (val_bpb, avg_loops, ponder, train_s, VRAM) in this section
+   and `results.tsv`; give a Decision.
+2. If near-null: failure-recovery try is a stronger tau (e.g. 0.01) since tau=0.001 gives a
+   very weak gradient through R; if avg_loops collapses to ~1, retry with
+   `NANO_PONDER_WARMUP_STEPS` inside the 1200-step harness (e.g. 300).
+3. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
