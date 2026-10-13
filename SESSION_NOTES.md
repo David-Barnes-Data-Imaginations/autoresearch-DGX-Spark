@@ -1660,12 +1660,47 @@ plan: `docs/research_plan/recursion_research_plan.md` Research Avenue 9.
 ### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
 Runner: `run_ra09_exp.sh` (repo root). R0 = `NANO_ACT_PONDER=0`; R1 = `NANO_ACT_PONDER=1`,
 tau=0.001, no anneal. Only `NANO_ACT_PONDER` differs. Logs: `logs/ra09_runner.log`,
-`logs/ra09_{R0_baseline1200,R1_ponder1200}.log`. Results pending (wrap-up records them).
+`logs/ra09_{R0_baseline1200,R1_ponder1200}.log`. Results recorded below (wrap-up).
+
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | ponder (N+R) | MFU |
+|-----|---------|-------------|---------|--------------|-----------|--------------|-----|
+| R0 (ponder OFF) | 2.301161 | — | 536.4 | 1396.6 | 2.99/8 | — | 17.5% |
+| R1 (ponder ON, tau=0.001) | 2.304845 | **+0.003684** | 460.3 | 1396.6 | 1.51/8 | ~2.0–2.2 | 20.4% |
+| ref: RA-02 R2 baseline | 2.301180 | −0.000019 vs R0 | 526.9 | 1396.6 | 2.99/8 | — | 17.8% |
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.135213 | 2.822785 | 2.598176 | 2.453540 | 2.365567 | 2.320320 | 2.303588 | 2.301161 |
+| R1 | 3.133184 | 2.822169 | 2.601499 | 2.457576 | 2.369533 | 2.324100 | 2.307287 | 2.304845 |
+| R1−R0 | −0.002029 | −0.000616 | +0.003323 | +0.004036 | +0.003966 | +0.003780 | +0.003699 | **+0.003684** |
+
+Both runs 1200/1200 steps, 39.3M tokens. R0 reproduces the adopted HC baseline to ~2e−5.
+R1 avg_loops dropped 2.4→1.5/8 within the first ~150 steps and stayed there (ponder ≈2.0–2.2
+throughout): the plan's predicted early-halting collapse. Fewer loops gave ~14% faster
+training and higher MFU, but quality fell behind from step 450 onward and never recovered.
+
+### Decision: RA-09 WORSE — not adopted (failure-recovery retry pending)
+- Δ+0.003684 is a clear regression (comparable in size to the Hyperloop win, opposite sign).
+- Cause is the halting collapse (avg_loops 2.99→1.51), not instability: no NaNs, VRAM unchanged.
+- Baseline unchanged at **2.301180 @1200** (Parcae+RoPE+MoD-0.5+HC K=4);
+  code default stays `NANO_ACT_PONDER=0`.
+- RA-09 strike 1. Per the plan's mitigation, retry with a linear tau anneal before closing.
+
+### Artifacts
+- run_ra09_exp.sh — matched R0/R1 runner (repo root; keep for retry).
+- logs/ra09_{smoke,R0_baseline1200,R1_ponder1200,runner}.log
+- checkpoints/nano_mythos_ra09_{R0_baseline1200,R1_ponder1200}.pt
+- results.tsv — RA-09 R0/R1 block appended.
+
+### Phase B status
+Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-09 retry, RA-10, RA-12).
 
 ### Next session
-1. Record RA-09 R0/R1 results (val_bpb, avg_loops, ponder, train_s, VRAM) in this section
-   and `results.tsv`; give a Decision.
-2. If near-null: failure-recovery try is a stronger tau (e.g. 0.01) since tau=0.001 gives a
-   very weak gradient through R; if avg_loops collapses to ~1, retry with
-   `NANO_PONDER_WARMUP_STEPS` inside the 1200-step harness (e.g. 300).
+1. RA-09 failure-recovery retry: R1 with `NANO_PONDER_WARMUP_STEPS=300` (linear tau anneal
+   inside the 1200-step harness), tau=0.001, matched R0. Collapse happened by step ~150, so
+   the anneal must cover that window. A stronger tau is not the fix here (R1 already over-halts).
+2. If the retry is still worse or near-null, close RA-09 (archive `run_ra09_exp.sh` →
+   `scripts/archive/`) and advance to **RA-10**.
 3. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
