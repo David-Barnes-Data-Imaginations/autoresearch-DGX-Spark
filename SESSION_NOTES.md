@@ -1702,5 +1702,30 @@ Phase B QUEUED — Phase A/plan Phase 4 avenues remain (RA-09 retry, RA-10, RA-1
    inside the 1200-step harness), tau=0.001, matched R0. Collapse happened by step ~150, so
    the anneal must cover that window. A stronger tau is not the fix here (R1 already over-halts).
 2. If the retry is still worse or near-null, close RA-09 (archive `run_ra09_exp.sh` →
-   `scripts/archive/`) and advance to **RA-10**.
+   `scripts/archive/`) and advance to **RA-13** (queue below; approved by David 2026-10-13).
 3. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+
+### Research queue (after RA-09 closes) — updated 2026-10-13
+Numbering note: RA-11 is already used (Recycled KV Memory, completed neutral), so the two new
+speedrun-derived avenues take the next free ids RA-13/RA-14 but run FIRST, ahead of RA-10/RA-12.
+
+1. **RA-13 Muon optimizer (NorMuon + Polar Express)** — env flag `NANO_MUON` (default 0).
+   - Port `MuonAdamW` (polar_express_coeffs, NorMuon variance reduction, cautious WD) from
+     `train.py` into `training/nano_mythos_train.py`.
+   - Muon on 2D hidden matrices (prelude/loop/coda attn + FFN). AdamW kept for embeddings,
+     head (tied), scalars/norms, Parcae A/LTI params, MoD/ACT router and gates.
+   - Matched pair: R0 = baseline (`NANO_MUON=0`), R1 = `NANO_MUON=1`, Muon LR anchor 0.02.
+     Optional R2 = Muon LR variant (e.g. 0.01 or 0.04) if R1 is unstable or borderline.
+     Shared recurrent block sees 8 loops of grads, so LR sensitivity is the main risk.
+   - Sources: https://github.com/KellerJordan/modded-nanogpt (records #3 Muon, #38 Polar
+     Express PR #134, #41 NorMuon PR #144 / https://arxiv.org/abs/2510.05491, #43 Cautious WD
+     PR #154); Recursive notes AdamW→Muon as key from a vanilla start:
+     https://www.recursive.com/articles/first-steps-toward-automated-ai-research
+2. **RA-14 Hashed bigram (+trigram) embeddings** — env flag `NANO_BIGRAM` (R2 adds trigram).
+   - Hash (prev_tok, tok) into a fixed-size table; add to token embedding BEFORE the prelude
+     via a learned gate initialised to zero (no effect at step 0). Sparse/row-wise updates.
+   - Matched pair: R0 = baseline, R1 = bigram only, R2 = bigram + trigram (distinct hash primes).
+   - Sources: modded-nanogpt records #62 Bigram Hash Embedding (PR #201), #83 sign trick
+     (PR #299); Recursive hashed bigram/trigram value-path tables (article above).
+3. **RA-10 Continuous Latent Beam Search** — unchanged, after RA-14.
+4. **RA-12 Nanbeige 3B Compact MoE** — unchanged, last.
