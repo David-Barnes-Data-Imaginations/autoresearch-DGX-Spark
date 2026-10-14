@@ -1758,4 +1758,60 @@ for a short smoke.
 ### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
 R0 = `NANO_ACT_PONDER=0`; R1 = `NANO_ACT_PONDER=1`, tau=0.001, warmup=300. Only
 `NANO_ACT_PONDER` differs. Logs: `logs/ra09_retry_runner.log`,
-`logs/ra09_{R0_w300_baseline1200,R1_w300_ponder1200}.log`. Results pending (10:22 wrap-up).
+`logs/ra09_{R0_w300_baseline1200,R1_w300_ponder1200}.log`. Results recorded below (wrap-up).
+
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | ponder (N+R) | MFU |
+|-----|---------|-------------|---------|--------------|-----------|--------------|-----|
+| R0 (ponder OFF) | 2.301187 | — | 529.2 | 1396.6 | 2.98/8 | — | 17.7% |
+| R1 (ponder ON, tau=0.001, warmup=300) | 2.301501 | **+0.000314** | 460.4 | 1396.6 | 1.51/8 | ~2.0–2.2 | 20.4% |
+| ref: 2026-10-13 R1 (no anneal) | 2.304845 | +0.003684 vs its R0 | 460.3 | 1396.6 | 1.51/8 | ~2.0–2.2 | 20.4% |
+| ref: RA-02 R2 baseline | 2.301180 | −0.000007 vs R0 | 526.9 | 1396.6 | 2.99/8 | — | 17.8% |
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.135211 | 2.822784 | 2.598169 | 2.453552 | 2.365595 | 2.320346 | 2.303615 | 2.301187 |
+| R1 | 3.135165 | 2.823024 | 2.598314 | 2.453433 | 2.365676 | 2.320583 | 2.303913 | 2.301501 |
+| R1−R0 | −0.000046 | +0.000240 | +0.000145 | −0.000119 | +0.000081 | +0.000237 | +0.000298 | **+0.000314** |
+
+Both runs 1200/1200 steps, 39.3M tokens; R1 log confirms `act_ponder=True ponder_tau=0.001
+ponder_warm=300`. R0 reproduces the adopted HC baseline to ~1e−5.
+The anneal removed most of the quality loss (+0.003684 → +0.000314) but did NOT prevent the
+halting collapse: avg_loops fell 2.4→1.9 by step 100 and locked at 1.5/8 from step ~110
+(while the anneal scalar was still only ~0.37), staying there to the end — the same depth and
+timing as the un-annealed pair. So the collapse is not driven by full-strength tau alone; the
+halting router finds the 1.5-loop solution almost as soon as any ponder pressure is applied.
+Side effect: ~13% less training time and higher MFU at near-equal val_bpb (fewer loops), but
+that is a compute saving, not a val_bpb win, and the plan's goal was adaptive depth, which
+collapsed instead.
+Caveat for any future revisit: the collapse timing was unchanged by the anneal, so confirm the
+`_ponder_warm` buffer value actually reaches the compiled graph (log `loss` ponder term at
+steps 0/150/300) before trying other mitigations.
+
+### Decision: RA-09 COMPLETED-NEUTRAL (slightly worse) — closed, not adopted
+- Retry Δ+0.000314 is near-null and on the wrong side; the first pair was +0.003684 worse.
+- Halting collapse (2.98→1.51 avg_loops) persists with the anneal, so the adaptive-depth goal
+  of RA-09 is not met.
+- Baseline unchanged at **2.301180 @1200** (Parcae+RoPE+MoD-0.5+HC K=4);
+  code default stays `NANO_ACT_PONDER=0`, `NANO_PONDER_WARMUP_STEPS=0`.
+- Per the 2026-10-13 Next session rule (retry still worse or near-null → close), RA-09 closes.
+
+### Artifacts
+- run_ra09_exp.sh, run_ra09_retry.sh — matched runners (repo root; archive next session).
+- logs/ra09_retry_{smoke,runner}.log, logs/ra09_{R0_w300_baseline1200,R1_w300_ponder1200}.log
+- checkpoints/nano_mythos_ra09_{R0_w300_baseline1200,R1_w300_ponder1200}.pt
+- results.tsv — RA-09 retry block + conclusion appended.
+
+### Phase B status
+Phase B QUEUED — remaining avenues per the 2026-10-13 research queue (RA-13, RA-14, RA-10, RA-12).
+
+### Next session
+1. Archive `run_ra09_exp.sh` and `run_ra09_retry.sh` → `scripts/archive/` (RA-09 closed).
+2. Start **RA-13 Muon optimizer (NorMuon + Polar Express)** per the 2026-10-13 research queue:
+   env flag `NANO_MUON` (default 0), port `MuonAdamW` from `train.py` into
+   `training/nano_mythos_train.py`, Muon on 2D hidden matrices only (AdamW for embeddings,
+   tied head, scalars/norms, Parcae A/LTI, MoD/ACT router and gates). Smoke first, then matched
+   R0 (`NANO_MUON=0`) vs R1 (`NANO_MUON=1`, Muon LR 0.02); optional R2 LR variant if unstable.
+3. Then RA-14 hashed bigram (+trigram) embeddings, then RA-10, then RA-12.
+4. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
