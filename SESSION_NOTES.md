@@ -1729,3 +1729,33 @@ speedrun-derived avenues take the next free ids RA-13/RA-14 but run FIRST, ahead
      (PR #299); Recursive hashed bigram/trigram value-path tables (article above).
 3. **RA-10 Continuous Latent Beam Search** — unchanged, after RA-14.
 4. **RA-12 Nanbeige 3B Compact MoE** — unchanged, last.
+
+
+## Session Date: 2026-10-14 — RA-09 Dynamic ACT Ponder Loss failure-recovery retry (warmup=300)
+
+### Setup
+Daily session from the 2026-10-13 Next session pointer: RA-09 failure-recovery retry with
+`NANO_PONDER_WARMUP_STEPS=300` (linear tau anneal 0→0.001 over the first 300 steps) so the
+ponder cost cannot drive the early-halting collapse seen by step ~150 in the first pair.
+Previous session (RA-09 first pair) already recorded and pushed (c287e0d, 2e7363e).
+Baseline unchanged: Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle before launch.
+
+### Paper
+Same as 2026-10-13: Dehghani et al., *Universal Transformers* (arXiv:1807.03819) / Graves ACT
+ponder cost; plan `docs/research_plan/recursion_research_plan.md` Research Avenue 9
+(failure mitigation: anneal tau).
+
+### Implementation
+No code change: the anneal (`NANO_PONDER_WARMUP_STEPS`, `_ponder_warm` buffer filled outside
+the compiled graph) was already implemented on 2026-10-13, default 0 = off; `NANO_ACT_PONDER`
+default stays 0. Runner: `run_ra09_retry.sh` (repo root) — same matched pair as
+`run_ra09_exp.sh` but with `NANO_PONDER_WARMUP_STEPS=300` (tau=0.001); `RA09_SMOKE=1` mode
+for a short smoke.
+- Smoke (30 steps, ponder ON, warmup=300): no crash, ponder ≈2.64–2.72, avg_loops 2.3–2.4/8,
+  val_bpb 3.215819 @30 (`logs/ra09_retry_smoke.log`).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
+R0 = `NANO_ACT_PONDER=0`; R1 = `NANO_ACT_PONDER=1`, tau=0.001, warmup=300. Only
+`NANO_ACT_PONDER` differs. Logs: `logs/ra09_retry_runner.log`,
+`logs/ra09_{R0_w300_baseline1200,R1_w300_ponder1200}.log`. Results pending (10:22 wrap-up).
