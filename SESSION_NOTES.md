@@ -1815,3 +1815,42 @@ Phase B QUEUED — remaining avenues per the 2026-10-13 research queue (RA-13, R
    R0 (`NANO_MUON=0`) vs R1 (`NANO_MUON=1`, Muon LR 0.02); optional R2 LR variant if unstable.
 3. Then RA-14 hashed bigram (+trigram) embeddings, then RA-10, then RA-12.
 4. Baseline stays Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 (ref 2.301180 @1200).
+
+## Session Date: 2026-10-15 — RA-13 Muon optimizer (NorMuon + Polar Express) launch
+
+### Setup
+Daily session from the 2026-10-14 Next session pointer: archive RA-09 runners (already done
+in 4844466), then start **RA-13 Muon**. Baseline unchanged: Parcae + RoPE + MoD-0.5 +
+Hyperloop HC K=4 (ref 2.301180 @1200). Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle.
+
+### Paper / sources
+KellerJordan modded-nanogpt (Muon #3, Polar Express PR #134, NorMuon PR #144 /
+arXiv:2510.05491, Cautious WD PR #154); Recursive AdamW→Muon note. Port from repo
+`train.py` `MuonAdamW` into `training/nano_mythos_train.py`.
+
+### Implementation
+- Env flag `NANO_MUON` (default 0). Also `NANO_MUON_LR=0.02`, `NANO_MUON_WD=0.2`,
+  `NANO_MUON_NS_STEPS=5`, `NANO_MUON_MOMENTUM=0.95`.
+- When ON: Muon on 2D Linear weights under `prelude.*` / `recurrent.block.*` / `coda.*`
+  (attn + FFN). AdamW kept for embeddings (tied head), norms, Parcae LTI, MoD/ACT
+  routers, Hyperloop scalars, LoRA. Polar Express + NorMuon variance reduction +
+  cautious WD; momentum warmup 0.85→0.95 over 300 steps. LR schedule uses per-group
+  `initial_lr * cosine_frac` so Muon and AdamW share the same schedule shape.
+- OFF path = stock AdamW (bit-consistent with prior baseline).
+- Runner: `run_ra13_exp.sh` (repo root). `RA13_SMOKE=1` → 30-step smoke.
+- Smoke (30 steps): R0 AdamW and R1 Muon both completed; R1 split 35 muon mats
+  (4.92M) + 31 adamw (4.20M); both val_bpb 3.215818 @30 (`logs/ra13_smoke_runner.log`).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
+R0 = `NANO_MUON=0`; R1 = `NANO_MUON=1`, Muon LR=0.02. Only `NANO_MUON` differs.
+Logs: `logs/ra13_runner.log`, `logs/ra13_{R0_baseline1200,R1_muon1200}.log`.
+Results to be recorded at wrap-up (~10:22 UK).
+
+### Decision
+Pending wrap-up.
+
+### Next session
+1. Record RA-13 results; adopt / neutral / worse.
+2. If unstable or borderline, optional R2 Muon LR variant (0.01 or 0.04).
+3. Then RA-14 hashed bigram (+trigram) embeddings, then RA-10, then RA-12.
+4. Archive `run_ra13_exp.sh` → `scripts/archive/` when RA-13 closes.

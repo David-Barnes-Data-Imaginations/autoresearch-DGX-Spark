@@ -1147,6 +1147,12 @@ LATENT_WARMUP_STEPS = _env_int("NANO_LATENT_WARMUP_STEPS", 2000)
 ACT_PONDER = _env_bool("NANO_ACT_PONDER", False)
 PONDER_TAU = _env_float("NANO_PONDER_TAU", 0.001)
 PONDER_WARMUP_STEPS = _env_int("NANO_PONDER_WARMUP_STEPS", 0)
+# RA-13: Muon optimizer (NorMuon + Polar Express); default OFF = stock AdamW
+MUON = _env_bool("NANO_MUON", False)
+MUON_LR = _env_float("NANO_MUON_LR", 0.02)  # matrix LR anchor (queue / modded-nanogpt)
+MUON_WD = _env_float("NANO_MUON_WD", 0.2)   # cautious weight decay for Muon
+MUON_NS_STEPS = _env_int("NANO_MUON_NS_STEPS", 5)
+MUON_MOMENTUM = _env_float("NANO_MUON_MOMENTUM", 0.95)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -1165,7 +1171,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"rad_gamma={RAD_GAMMA} hyperloop={HYPERLOOP} hyperloop_K={HYPERLOOP_STREAMS} "
       f"latent_cot={LATENT_COT} latent_aux_w={LATENT_AUX_WEIGHT} "
       f"latent_warm={LATENT_WARMUP_STEPS} act_ponder={ACT_PONDER} ponder_tau={PONDER_TAU} "
-      f"ponder_warm={PONDER_WARMUP_STEPS} tag={CKPT_TAG}")
+      f"ponder_warm={PONDER_WARMUP_STEPS} "
+      f"muon={MUON} muon_lr={MUON_LR} muon_wd={MUON_WD} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -1269,14 +1276,261 @@ print(f"Total batch: {TOTAL_BATCH_SIZE:,} tokens")
 print(f"Time budget: {TIME_BUDGET}s ({TIME_BUDGET/3600:.0f}h)")
 print(f"Steps per epoch: ~{tokens_per_fwdbwd * grad_accum_steps / 1e6:.1f}M tokens/step")
 
+# ---------------------------------------------------------------------------
+# RA-13: MuonAdamW (NorMuon + Polar Express + cautious WD) — used when NANO_MUON=1
+# Ported from train.py / KellerJordan modded-nanogpt. Default path stays stock AdamW.
+# ---------------------------------------------------------------------------
+polar_express_coeffs = [
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+]
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def adamw_step_fused(
+    p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t
+):
+    p.mul_(1 - lr_t * wd_t)
+    exp_avg.lerp_(grad, 1 - beta1_t)
+    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
+    bias1 = 1 - beta1_t**step_t
+    bias2 = 1 - beta2_t**step_t
+    denom = (exp_avg_sq / bias2).sqrt() + eps_t
+    step_size = lr_t / bias1
+    p.add_(exp_avg / denom, alpha=-step_size)
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def muon_step_fused(
+    stacked_grads,
+    stacked_params,
+    momentum_buffer,
+    second_momentum_buffer,
+    momentum_t,
+    lr_t,
+    wd_t,
+    beta2_t,
+    ns_steps,
+    red_dim,
+):
+    # Nesterov momentum
+    momentum = momentum_t.to(stacked_grads.dtype)
+    momentum_buffer.lerp_(stacked_grads, 1 - momentum)
+    g = stacked_grads.lerp_(momentum_buffer, momentum)
+    # Polar express orthogonalization
+    X = g.bfloat16()
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
+    if g.size(-2) > g.size(-1):
+        for a, b, c in polar_express_coeffs[:ns_steps]:
+            A = X.mT @ X
+            B = b * A + c * (A @ A)
+            X = a * X + X @ B
+    else:
+        for a, b, c in polar_express_coeffs[:ns_steps]:
+            A = X @ X.mT
+            B = b * A + c * (A @ A)
+            X = a * X + B @ X
+    g = X
+    # NorMuon variance reduction
+    beta2 = beta2_t.to(g.dtype)
+    v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
+    red_dim_size = g.size(red_dim)
+    v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
+    v_norm = v_norm_sq.sqrt()
+    second_momentum_buffer.lerp_(
+        v_mean.to(dtype=second_momentum_buffer.dtype), 1 - beta2
+    )
+    step_size = second_momentum_buffer.clamp_min(1e-10).rsqrt()
+    scaled_sq_sum = (v_mean * red_dim_size) * step_size.float().square()
+    v_norm_new = scaled_sq_sum.sum(dim=(-2, -1), keepdim=True).sqrt()
+    final_scale = step_size * (v_norm / v_norm_new.clamp_min(1e-10))
+    g = g * final_scale.to(g.dtype)
+    # Cautious weight decay + parameter update
+    lr = lr_t.to(g.dtype)
+    wd = wd_t.to(g.dtype)
+    mask = (g * stacked_params) >= 0
+    stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
+
+
+class MuonAdamW(torch.optim.Optimizer):
+    """Combined optimizer: Muon for 2D matrix params, AdamW for others."""
+
+    def __init__(self, param_groups):
+        super().__init__(param_groups, defaults={})
+        # 0-D CPU tensors to avoid torch.compile recompilation when values change
+        self._adamw_step_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_beta1_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_eps_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_momentum_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+
+    def _step_adamw(self, group):
+        for p in group["params"]:
+            if p.grad is None:
+                continue
+            grad = p.grad
+            state = self.state[p]
+            if not state:
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(p)
+                state["exp_avg_sq"] = torch.zeros_like(p)
+            state["step"] += 1
+            self._adamw_step_t.fill_(state["step"])
+            self._adamw_lr_t.fill_(group["lr"])
+            self._adamw_beta1_t.fill_(group["betas"][0])
+            self._adamw_beta2_t.fill_(group["betas"][1])
+            self._adamw_eps_t.fill_(group["eps"])
+            self._adamw_wd_t.fill_(group["weight_decay"])
+            adamw_step_fused(
+                p,
+                grad,
+                state["exp_avg"],
+                state["exp_avg_sq"],
+                self._adamw_step_t,
+                self._adamw_lr_t,
+                self._adamw_beta1_t,
+                self._adamw_beta2_t,
+                self._adamw_eps_t,
+                self._adamw_wd_t,
+            )
+
+    def _step_muon(self, group):
+        params = group["params"]
+        if not params:
+            return
+        p = params[0]
+        state = self.state[p]
+        num_params = len(params)
+        shape, device, dtype = p.shape, p.device, p.dtype
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros(
+                num_params, *shape, dtype=dtype, device=device
+            )
+        if "second_momentum_buffer" not in state:
+            state_shape = (
+                (num_params, shape[-2], 1)
+                if shape[-2] >= shape[-1]
+                else (num_params, 1, shape[-1])
+            )
+            state["second_momentum_buffer"] = torch.zeros(
+                state_shape, dtype=dtype, device=device
+            )
+        red_dim = -1 if shape[-2] >= shape[-1] else -2
+        stacked_grads = torch.stack(
+            [p.grad if p.grad is not None else torch.zeros_like(p) for p in params]
+        )
+        stacked_params = torch.stack(params)
+        self._muon_momentum_t.fill_(group["momentum"])
+        self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
+        self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
+        self._muon_wd_t.fill_(group["weight_decay"])
+        muon_step_fused(
+            stacked_grads,
+            stacked_params,
+            state["momentum_buffer"],
+            state["second_momentum_buffer"],
+            self._muon_momentum_t,
+            self._muon_lr_t,
+            self._muon_wd_t,
+            self._muon_beta2_t,
+            group["ns_steps"],
+            red_dim,
+        )
+        torch._foreach_copy_(params, list(stacked_params.unbind(0)))
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            if group["kind"] == "adamw":
+                self._step_adamw(group)
+            elif group["kind"] == "muon":
+                self._step_muon(group)
+
+
+def _is_muon_matrix_param(name: str, p: torch.nn.Parameter) -> bool:
+    """2D Linear weights in prelude / looped block / coda attn+FFN only.
+    AdamW keeps embeddings, tied head, norms, Parcae LTI, MoD/ACT routers,
+    Hyperloop scalars, LoRA adapters, etc. (per SESSION_NOTES RA-13 queue)."""
+    if p.ndim != 2:
+        return False
+    return (
+        name.startswith("prelude.")
+        or name.startswith("coda.")
+        or name.startswith("recurrent.block.")
+    )
+
+
+def build_optimizer(model):
+    """Stock AdamW when NANO_MUON=0; MuonAdamW hybrid when NANO_MUON=1."""
+    if not MUON:
+        opt = torch.optim.AdamW(
+            model.parameters(),
+            lr=LEARNING_RATE,
+            betas=(BETA1, BETA2),
+            weight_decay=WEIGHT_DECAY,
+            eps=1e-8,
+        )
+        for group in opt.param_groups:
+            group["initial_lr"] = group["lr"]
+            group["kind"] = "adamw"
+        print(f"[RA-13] optimizer=AdamW (NANO_MUON=0) lr={LEARNING_RATE} wd={WEIGHT_DECAY}")
+        return opt
+
+    matrix_params = []
+    adamw_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if _is_muon_matrix_param(name, p):
+            matrix_params.append(p)
+        else:
+            adamw_params.append(p)
+    n_mat = sum(p.numel() for p in matrix_params)
+    n_adam = sum(p.numel() for p in adamw_params)
+    print(
+        f"[RA-13] optimizer=MuonAdamW muon_lr={MUON_LR} muon_wd={MUON_WD} "
+        f"ns_steps={MUON_NS_STEPS} momentum={MUON_MOMENTUM} | "
+        f"muon_params={len(matrix_params)} ({n_mat:,}) adamw_params={len(adamw_params)} ({n_adam:,})"
+    )
+    param_groups = [
+        dict(
+            kind="adamw",
+            params=adamw_params,
+            lr=LEARNING_RATE,
+            betas=(BETA1, BETA2),
+            eps=1e-8,
+            weight_decay=0.0,  # embeddings/scalars/routers: no WD (train.py style)
+        ),
+    ]
+    for shape in sorted({p.shape for p in matrix_params}):
+        group_params = [p for p in matrix_params if p.shape == shape]
+        param_groups.append(
+            dict(
+                kind="muon",
+                params=group_params,
+                lr=MUON_LR,
+                momentum=MUON_MOMENTUM,
+                ns_steps=MUON_NS_STEPS,
+                beta2=0.95,
+                weight_decay=MUON_WD,
+            )
+        )
+    opt = MuonAdamW(param_groups)
+    for group in opt.param_groups:
+        group["initial_lr"] = group["lr"]
+    return opt
+
+
 # Optimizer
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=LEARNING_RATE,
-    betas=(BETA1, BETA2),
-    weight_decay=WEIGHT_DECAY,
-    eps=1e-8,
-)
+optimizer = build_optimizer(model)
 
 model = torch.compile(model, dynamic=False)
 
@@ -1291,12 +1545,23 @@ x, y, epoch = next(train_loader)
 # LR Schedule
 # ---------------------------------------------------------------------------
 
-def get_lr(step: int, total_steps: int) -> float:
-    """Cosine LR schedule with linear warmup."""
+def get_lr_frac(step: int, total_steps: int) -> float:
+    """Cosine LR fraction with linear warmup (multiply by group initial_lr)."""
     if step < WARMUP_STEPS:
-        return LEARNING_RATE * step / WARMUP_STEPS
+        return step / max(1, WARMUP_STEPS)
     progress = (step - WARMUP_STEPS) / max(1, total_steps - WARMUP_STEPS)
-    return LEARNING_RATE * 0.5 * (1 + math.cos(math.pi * progress))
+    return 0.5 * (1 + math.cos(math.pi * progress))
+
+
+def get_lr(step: int, total_steps: int) -> float:
+    """Absolute LR for logging (AdamW / primary group)."""
+    return LEARNING_RATE * get_lr_frac(step, total_steps)
+
+
+def get_muon_momentum(step: int) -> float:
+    """Warm momentum 0.85 -> MUON_MOMENTUM over first 300 steps (train.py)."""
+    frac = min(step / 300.0, 1.0)
+    return (1 - frac) * 0.85 + frac * MUON_MOMENTUM
 
 
 # ---------------------------------------------------------------------------
@@ -1351,10 +1616,14 @@ while True:
                 raise SystemExit(f"Reduce DEVICE_BATCH_SIZE to {DEVICE_BATCH_SIZE} and restart")
             raise
 
-    # LR schedule
-    lr = get_lr(step, EXPECTED_STEPS)
+    # LR schedule (per-group initial_lr * cosine frac; Muon momentum warmup)
+    lr_frac = get_lr_frac(step, EXPECTED_STEPS)
+    lr = LEARNING_RATE * lr_frac  # for logging
+    muon_mom = get_muon_momentum(step) if MUON else None
     for group in optimizer.param_groups:
-        group["lr"] = lr
+        group["lr"] = group.get("initial_lr", LEARNING_RATE) * lr_frac
+        if MUON and group.get("kind") == "muon" and muon_mom is not None:
+            group["momentum"] = muon_mom
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP)
     optimizer.step()
