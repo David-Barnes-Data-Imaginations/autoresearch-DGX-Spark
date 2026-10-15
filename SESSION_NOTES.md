@@ -1844,13 +1844,56 @@ arXiv:2510.05491, Cautious WD PR #154); Recursive AdamW→Muon note. Port from r
 ### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4)
 R0 = `NANO_MUON=0`; R1 = `NANO_MUON=1`, Muon LR=0.02. Only `NANO_MUON` differs.
 Logs: `logs/ra13_runner.log`, `logs/ra13_{R0_baseline1200,R1_muon1200}.log`.
-Results to be recorded at wrap-up (~10:22 UK).
+Results recorded below (wrap-up).
 
-### Decision
-Pending wrap-up.
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | MFU |
+|-----|---------|-------------|---------|--------------|-----------|-----|
+| R0 (AdamW, `NANO_MUON=0`) | 2.301158 | — | 536.0 | 1396.6 | 3.01/8 | 17.5% |
+| R1 (Muon, `NANO_MUON=1`, LR 0.02) | 2.289139 | **−0.012019** | 490.5 | 1377.9 | 3.24/8 | 19.1% |
+| ref: RA-02 R2 baseline | 2.301180 | +0.000022 vs R0 | 526.9 | 1396.6 | 2.99/8 | 17.8% |
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.135213 | 2.822786 | 2.598168 | 2.453526 | 2.365554 | 2.320313 | 2.303587 | 2.301158 |
+| R1 | 3.139316 | 2.823788 | 2.584597 | 2.435207 | 2.349947 | 2.307193 | 2.291264 | 2.289139 |
+| R1−R0 | +0.004103 | +0.001002 | −0.013571 | −0.018319 | −0.015607 | −0.013120 | −0.012323 | **−0.012019** |
+
+Both runs 1200/1200 steps, 39.3M tokens. R1 log confirms `optimizer=MuonAdamW muon_lr=0.02
+muon_wd=0.2 ns_steps=5 momentum=0.95 | muon_params=35 (4,915,200) adamw_params=31 (4,201,279)`.
+R0 reproduces the adopted HC baseline (2.301180) to ~2e−5. No NaN/inf in either log.
+Muon is slightly behind during momentum warmup (steps ≤300), pulls ahead from step ~450
+(peak gap −0.0183 at 600) and holds a ~−0.012 lead to the end. Final train loss 6.407 vs 6.450.
+Side effects are all favourable: ~8.5% less training time (490.5 vs 536.0 s), higher MFU
+(19.1% vs 17.5%), slightly lower peak VRAM. avg_loops rose a little (3.01→3.24), no collapse.
+The gain is ~40x the R0 reproduction drift and ~40x the RA-09 near-null deltas, so a single
+matched pair is treated as conclusive.
+
+### Decision: RA-13 ADOPTED
+- R1 Δ−0.012019 is the largest single-avenue gain on the nano_mythos track, and it is faster.
+- New baseline: Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 + **Muon (NorMuon + Polar Express,
+  LR 0.02)**, ref **2.289139 @1200**.
+- Code default stays `NANO_MUON=0` for now; future matched pairs set `NANO_MUON=1` in both
+  R0 and R1 (flip the default in a later code commit if preferred).
+- No LR variant needed (result is neither unstable nor borderline); LR tuning (0.01 / 0.04)
+  stays optional for later.
+
+### Artifacts
+- run_ra13_exp.sh — matched runner (repo root; archive next session).
+- logs/ra13_{smoke_runner,runner}.log, logs/ra13_{R0_baseline1200,R1_muon1200}.log,
+  logs/ra13_{R0_baselinesmoke,R1_muonsmoke}.log
+- checkpoints/nano_mythos_ra13_{R0_baseline1200,R1_muon1200}.pt
+- results.tsv — RA-13 block + decision appended.
+
+### Phase B status
+Phase B continuing — remaining avenues: RA-14, RA-10, RA-12.
 
 ### Next session
-1. Record RA-13 results; adopt / neutral / worse.
-2. If unstable or borderline, optional R2 Muon LR variant (0.01 or 0.04).
-3. Then RA-14 hashed bigram (+trigram) embeddings, then RA-10, then RA-12.
-4. Archive `run_ra13_exp.sh` → `scripts/archive/` when RA-13 closes.
+1. Archive `run_ra13_exp.sh` → `scripts/archive/` (RA-13 closed, adopted).
+2. Start **RA-14 hashed bigram (+trigram) embeddings** on top of the new Muon baseline:
+   env flag (default 0), smoke first, then matched R0 (`NANO_MUON=1`, feature OFF) vs R1
+   (`NANO_MUON=1`, feature ON). Decide which optimizer group the hash tables join (AdamW,
+   like the token embeddings).
+3. Then RA-10, then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
+4. Baseline is now Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
