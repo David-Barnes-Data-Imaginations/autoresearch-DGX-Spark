@@ -1898,13 +1898,13 @@ Phase B continuing — remaining avenues: RA-14, RA-10, RA-12.
 3. Then RA-10, then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
 4. Baseline is now Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
 
-## Session Date: 2026-10-16 — RA-14 hashed bigram embeddings launch
+## Session Date: 2026-10-16 — RA-14 hashed bigram embeddings
 
 ### Setup
 Daily session from the 2026-10-15 Next session pointer: archive RA-13 runner (already done
 in a697331/b1be47b), then start **RA-14 hashed bigram embeddings** on the Muon baseline.
 Baseline: Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref **2.289139 @1200**).
-Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle.
+Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle at launch.
 
 ### Paper / sources
 modded-nanogpt record #62 Bigram Hash Embedding (PR #201), #83 sign trick (PR #299);
@@ -1921,24 +1921,58 @@ https://www.recursive.com/articles/first-steps-toward-automated-ai-research
   Embedding shape.
 - Smoke (30 steps, Muon+bigram): completed; val_bpb 3.215818 @30 (matches RA-13 smoke);
   19.6M params (10.5M bigram table); `logs/ra14_smoke.log`.
+- Code commit: `9e876dc` (RA-14 implementation + matched runner).
 
 ### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4, Muon ON both)
 R0 = `NANO_MUON=1 NANO_BIGRAM=0`; R1 = `NANO_MUON=1 NANO_BIGRAM=1`. Only `NANO_BIGRAM` differs.
 Logs: `logs/ra14_runner.log`, `logs/ra14_{R0_baseline1200,R1_bigram1200}.log`.
-Results recorded at wrap-up.
+Results recorded below (wrap-up).
 
-### Decision
-Pending wrap-up (10:22 UK).
+| run | val_bpb | Delta vs R0 | train_s | peak_vram_mb | avg_loops | MFU | params_M |
+|-----|---------|-------------|---------|--------------|-----------|-----|----------|
+| R0 (Muon, bigram OFF) | 2.288628 | — | 501.1 | 1377.9 | 3.43/8 | 18.7% | 9.1 |
+| R1 (Muon + hashed bigram) | 2.288850 | **+0.000222** | 500.6 | 1543.9 | 3.26/8 | 31.0%* | 19.6 |
+| ref: RA-13 adopted baseline | 2.289139 | +0.000511 vs R0 | 490.5 | 1377.9 | 3.24/8 | 19.1% | 9.1 |
+
+\*R1 MFU as reported by the trainer (includes larger embed table in the FLOP denom inconsistently; treat as indicative).
+
+Eval curve (val_bpb):
+
+| step | 150 | 300 | 450 | 600 | 750 | 900 | 1050 | 1200 |
+|------|-----|-----|-----|-----|-----|-----|------|------|
+| R0 | 3.139312 | 2.823672 | 2.584279 | 2.434874 | 2.349552 | 2.306651 | 2.290940 | 2.288628 |
+| R1 | 3.139320 | 2.823787 | 2.584563 | 2.435214 | 2.349717 | 2.306966 | 2.291060 | 2.288850 |
+| R1−R0 | +0.000008 | +0.000115 | +0.000284 | +0.000340 | +0.000165 | +0.000315 | +0.000120 | **+0.000222** |
+
+Both runs 1200/1200 steps, 39.3M tokens. R1 log confirms `bigram=True trigram=False table_size=40960
+bigram_params=10,485,760` (hash tables → AdamW with token embeddings). R0 reproduces the
+adopted Muon baseline (2.289139) to ~5e−4. No NaN/inf in either log.
+R1 tracks R0 within ~3e−4 across the whole eval curve and finishes slightly worse
+(+0.000222). Train time is essentially identical (~1.00×); peak VRAM +166 MB; params
+roughly double from the bigram table. Gate-init-0 never pulls ahead enough to matter.
+The delta is within the near-null band used for RA-07/RA-09, so a single matched pair
+is treated as conclusive against adoption. Optional R2 (bigram+trigram) is skipped —
+R1 is not promising or borderline-positive.
+
+### Decision: RA-14 COMPLETED-NEUTRAL (not adopted)
+- R1 Δ+0.000222 vs R0 — near-null / slightly worse; not adopted.
+- Baseline unchanged: Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 + **Muon
+  (NorMuon + Polar Express, LR 0.02)**, ref **2.289139 @1200**.
+- Skip optional R2 trigram; archive the RA-14 runner next session.
+- Code default stays `NANO_BIGRAM=0` / `NANO_TRIGRAM=0`.
 
 ### Artifacts
-- run_ra14_exp.sh — matched runner (repo root).
-- logs/ra14_smoke.log (pre-launch smoke).
+- run_ra14_exp.sh — matched runner (repo root; archive next session).
+- logs/ra14_smoke.log, logs/ra14_runner.log, logs/ra14_{R0_baseline1200,R1_bigram1200}.log
+- checkpoints/nano_mythos_ra14_{R0_baseline1200,R1_bigram1200}.pt
+- results.tsv — RA-14 block + conclusion appended.
+- Implementation commit: 9e876dc
 
 ### Phase B status
-Phase B continuing — remaining after RA-14: RA-10, RA-12.
+Phase B continuing — remaining avenues: RA-10, RA-12.
 
 ### Next session
-1. Record RA-14 results; adopt / close; archive `run_ra14_exp.sh` if closed.
-2. Optional R2: bigram+trigram (`NANO_TRIGRAM=1`) if R1 is promising/borderline.
-3. Then RA-10, then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
-4. Baseline remains Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200) until RA-14 decides.
+1. Archive `run_ra14_exp.sh` → `scripts/archive/` (RA-14 closed, not adopted).
+2. Start **RA-10** (next in queue after RA-14).
+3. Then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
+4. Baseline remains Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
