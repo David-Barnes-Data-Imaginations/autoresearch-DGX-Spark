@@ -96,6 +96,10 @@ class NanoMythosConfig:
     act_ponder: bool = False           # add tau * mean(N + R) ponder cost to the training loss
     ponder_tau: float = 0.001          # plan default tau
     ponder_warmup_steps: int = 0       # linear tau anneal 0->tau (plan failure mitigation); 0 = off
+    # --- RA-14: Hashed bigram (+trigram) embeddings ---
+    bigram: bool = False               # hash (prev, tok) table added before prelude via gate
+    trigram: bool = False              # hash (prev2, prev1, tok) table; distinct primes
+    bigram_table_mult: int = 5         # table size = mult * vocab_size (modded-nanogpt #62)
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +931,41 @@ class RecurrentBlock(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# RA-14: Hashed bigram / trigram embeddings
+# ---------------------------------------------------------------------------
+
+def hash_bigram_ids(ids: torch.Tensor, table_size: int,
+                    p1: int = 36313, p2: int = 27191) -> torch.Tensor:
+    """Map (prev_tok, tok) -> bucket in [0, table_size). Pos 0 uses reserved bucket table_size-1.
+    Primes from modded-nanogpt PR #201 / record #62.
+    """
+    mod = table_size - 1
+    x = ids.to(torch.int64)
+    prev = torch.zeros_like(x)
+    prev[:, 1:] = x[:, :-1]
+    h = torch.bitwise_xor(p1 * x, p2 * prev) % mod
+    h[:, 0] = mod
+    return h
+
+
+def hash_trigram_ids(ids: torch.Tensor, table_size: int,
+                     p1: int = 73819, p2: int = 51767, p3: int = 29137) -> torch.Tensor:
+    """Map (prev2, prev1, tok) -> bucket; distinct primes from bigram (SESSION_NOTES RA-14 R2).
+    Pos 0/1 use reserved bucket table_size-1.
+    """
+    mod = table_size - 1
+    x = ids.to(torch.int64)
+    prev1 = torch.zeros_like(x)
+    prev2 = torch.zeros_like(x)
+    prev1[:, 1:] = x[:, :-1]
+    prev2[:, 2:] = x[:, :-2]
+    h = torch.bitwise_xor(torch.bitwise_xor(p1 * x, p2 * prev1), p3 * prev2) % mod
+    h[:, :2] = mod
+    return h
+
+
 # Full Nano-Mythos Model
 # ---------------------------------------------------------------------------
 
@@ -952,6 +991,23 @@ class NanoMythos(nn.Module):
         self.norm = RMSNorm(cfg.dim)
         self.head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         self.head.weight = self.embed.weight  # weight tying
+        # RA-14: hashed n-gram tables (zero-init) + scalar gates (zero = no effect at step 0)
+        self.bigram_enabled = bool(cfg.bigram)
+        self.trigram_enabled = bool(cfg.trigram)
+        table_size = max(2, int(cfg.bigram_table_mult) * int(cfg.vocab_size))
+        self.bigram_table_size = table_size
+        if self.bigram_enabled:
+            self.bigram_embed = nn.Embedding(table_size, cfg.dim)
+            self.bigram_gate = nn.Parameter(torch.zeros(1))  # rank-1 avoids adamw_step_fused 0-D recompile
+        else:
+            self.bigram_embed = None
+            self.register_parameter("bigram_gate", None)
+        if self.trigram_enabled:
+            self.trigram_embed = nn.Embedding(table_size, cfg.dim)
+            self.trigram_gate = nn.Parameter(torch.zeros(1))  # rank-1 avoids adamw_step_fused 0-D recompile
+        else:
+            self.trigram_embed = None
+            self.register_parameter("trigram_gate", None)
         # RA-07: warmup scalar updated each training step (tensor so torch.compile
         # does not specialize/recompile on a changing Python int attribute).
         self.register_buffer("_latent_warm", torch.zeros((), dtype=torch.float32), persistent=False)
@@ -961,11 +1017,21 @@ class NanoMythos(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        for m in self.modules():
+        for name, m in self.named_modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.02)
             elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, std=0.02)
+                # RA-14: hash tables stay zero so unused buckets never disrupt loss
+                if name in ("bigram_embed", "trigram_embed"):
+                    nn.init.zeros_(m.weight)
+                else:
+                    nn.init.normal_(m.weight, std=0.02)
+        if getattr(self, "bigram_gate", None) is not None:
+            with torch.no_grad():
+                self.bigram_gate.zero_()
+        if getattr(self, "trigram_gate", None) is not None:
+            with torch.no_grad():
+                self.trigram_gate.zero_()
 
     @staticmethod
     def _causal_mask(seq_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -977,6 +1043,13 @@ class NanoMythos(nn.Module):
         device = input_ids.device
 
         x = self.embed(input_ids)
+        # RA-14: add hashed n-gram embeddings before prelude (gate starts at 0)
+        if self.bigram_enabled and self.bigram_embed is not None:
+            bh = hash_bigram_ids(input_ids, self.bigram_table_size)
+            x = x + self.bigram_gate.reshape(()) * self.bigram_embed(bh)
+        if self.trigram_enabled and self.trigram_embed is not None:
+            th = hash_trigram_ids(input_ids, self.bigram_table_size)
+            x = x + self.trigram_gate.reshape(()) * self.trigram_embed(th)
         freqs_cis = self.freqs_cis[:T]
         mask = self._causal_mask(T, device, x.dtype) if T > 1 else None
 
@@ -1153,6 +1226,10 @@ MUON_LR = _env_float("NANO_MUON_LR", 0.02)  # matrix LR anchor (queue / modded-n
 MUON_WD = _env_float("NANO_MUON_WD", 0.2)   # cautious weight decay for Muon
 MUON_NS_STEPS = _env_int("NANO_MUON_NS_STEPS", 5)
 MUON_MOMENTUM = _env_float("NANO_MUON_MOMENTUM", 0.95)
+# RA-14: hashed bigram (+trigram) embeddings; default OFF
+BIGRAM = _env_bool("NANO_BIGRAM", False)
+TRIGRAM = _env_bool("NANO_TRIGRAM", False)
+BIGRAM_TABLE_MULT = _env_int("NANO_BIGRAM_TABLE_MULT", 5)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -1172,7 +1249,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"latent_cot={LATENT_COT} latent_aux_w={LATENT_AUX_WEIGHT} "
       f"latent_warm={LATENT_WARMUP_STEPS} act_ponder={ACT_PONDER} ponder_tau={PONDER_TAU} "
       f"ponder_warm={PONDER_WARMUP_STEPS} "
-      f"muon={MUON} muon_lr={MUON_LR} muon_wd={MUON_WD} tag={CKPT_TAG}")
+      f"muon={MUON} muon_lr={MUON_LR} muon_wd={MUON_WD} "
+      f"bigram={BIGRAM} trigram={TRIGRAM} bigram_mult={BIGRAM_TABLE_MULT} tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1310,9 @@ cfg = NanoMythosConfig(
     act_ponder=ACT_PONDER,
     ponder_tau=PONDER_TAU,
     ponder_warmup_steps=PONDER_WARMUP_STEPS,
+    bigram=BIGRAM,
+    trigram=TRIGRAM,
+    bigram_table_mult=BIGRAM_TABLE_MULT,
 )
 
 with torch.device("meta"):
@@ -1256,6 +1337,13 @@ if getattr(model.recurrent, "hc", None) is not None:
     print(f"[RA-02] Hyperloop init applied: K={model.recurrent.hyperloop_K} streams "
           f"(Hpre=[1,0..], Hpost=[1,0..], Hres=I)")
 
+if BIGRAM or TRIGRAM:
+    _bg = int(getattr(model, "bigram_table_size", 0) or 0)
+    _bg_n = model.bigram_embed.weight.numel() if getattr(model, "bigram_embed", None) is not None else 0
+    _tg_n = model.trigram_embed.weight.numel() if getattr(model, "trigram_embed", None) is not None else 0
+    print(f"[RA-14] bigram={BIGRAM} trigram={TRIGRAM} table_size={_bg} "
+          f"bigram_params={_bg_n:,} trigram_params={_tg_n:,} "
+          f"(hash tables -> AdamW with token embeddings)")
 print(f"Model: NanoMythos")
 print(f"Parameters: {num_params:,} ({num_params / 1e6:.1f}M)")
 print(f"Config: {asdict(cfg)}")
@@ -1280,6 +1368,13 @@ print(f"Steps per epoch: ~{tokens_per_fwdbwd * grad_accum_steps / 1e6:.1f}M toke
 # RA-13: MuonAdamW (NorMuon + Polar Express + cautious WD) — used when NANO_MUON=1
 # Ported from train.py / KellerJordan modded-nanogpt. Default path stays stock AdamW.
 # ---------------------------------------------------------------------------
+# RA-14: hashed bigram adds another Embedding shape to the AdamW group; the fused
+# adamw_step_fused is compiled with dynamic=False, so each rank/shape needs a cache
+# entry. Default recompile_limit=8 is too small once bigram/trigram tables join.
+import torch._dynamo
+torch._dynamo.config.recompile_limit = max(32, int(getattr(torch._dynamo.config, "recompile_limit", 8) or 8))
+torch._dynamo.config.force_parameter_static_shapes = False
+
 polar_express_coeffs = [
     (8.156554524902461, -22.48329292557795, 15.878769915207462),
     (4.042929935166739, -2.808917465908714, 0.5000178451051316),

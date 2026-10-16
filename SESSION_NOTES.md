@@ -1897,3 +1897,48 @@ Phase B continuing — remaining avenues: RA-14, RA-10, RA-12.
    like the token embeddings).
 3. Then RA-10, then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
 4. Baseline is now Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
+
+## Session Date: 2026-10-16 — RA-14 hashed bigram embeddings launch
+
+### Setup
+Daily session from the 2026-10-15 Next session pointer: archive RA-13 runner (already done
+in a697331/b1be47b), then start **RA-14 hashed bigram embeddings** on the Muon baseline.
+Baseline: Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref **2.289139 @1200**).
+Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle.
+
+### Paper / sources
+modded-nanogpt record #62 Bigram Hash Embedding (PR #201), #83 sign trick (PR #299);
+Recursive hashed bigram/trigram (gate-init-0 input path / value-path variants):
+https://www.recursive.com/articles/first-steps-toward-automated-ai-research
+
+### Implementation
+- Env flags `NANO_BIGRAM` / `NANO_TRIGRAM` (default 0), `NANO_BIGRAM_TABLE_MULT=5`.
+- Hash `(prev, tok)` (primes 36313/27191) into table size `5*vocab`; zero-init Embedding;
+  learned scalar gate shape `(1,)` init 0; add to token embedding **before prelude**.
+  Trigram path ready (distinct primes) behind `NANO_TRIGRAM` for optional R2.
+- Hash tables join AdamW with token embeddings (not Muon). Raised
+  `torch._dynamo.config.recompile_limit` to ≥32 so fused AdamW tolerates the extra
+  Embedding shape.
+- Smoke (30 steps, Muon+bigram): completed; val_bpb 3.215818 @30 (matches RA-13 smoke);
+  19.6M params (10.5M bigram table); `logs/ra14_smoke.log`.
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4, Muon ON both)
+R0 = `NANO_MUON=1 NANO_BIGRAM=0`; R1 = `NANO_MUON=1 NANO_BIGRAM=1`. Only `NANO_BIGRAM` differs.
+Logs: `logs/ra14_runner.log`, `logs/ra14_{R0_baseline1200,R1_bigram1200}.log`.
+Results recorded at wrap-up.
+
+### Decision
+Pending wrap-up (10:22 UK).
+
+### Artifacts
+- run_ra14_exp.sh — matched runner (repo root).
+- logs/ra14_smoke.log (pre-launch smoke).
+
+### Phase B status
+Phase B continuing — remaining after RA-14: RA-10, RA-12.
+
+### Next session
+1. Record RA-14 results; adopt / close; archive `run_ra14_exp.sh` if closed.
+2. Optional R2: bigram+trigram (`NANO_TRIGRAM=1`) if R1 is promising/borderline.
+3. Then RA-10, then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
+4. Baseline remains Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200) until RA-14 decides.
