@@ -2013,3 +2013,32 @@ R0 = `NANO_MUON=1 NANO_BEAM=0`; R1 = `NANO_MUON=1 NANO_BEAM=1`. Only `NANO_BEAM`
 Launched 2026-10-17 09:10 BST, runner PID 2130435.
 Logs: `logs/ra10_runner.log`, `logs/ra10_{R0_baseline1200,R1_beam1200}.log`.
 Results to be recorded at wrap-up.
+
+### Results (recorded 2026-10-17 ~11:20 BST; R1 finished 10:41, after the 10:22 wrap-up check)
+| Run | val_bpb @1200 | Δ vs R0 | train s | avg_loops | peak VRAM MB | MFU % |
+|---|---|---|---|---|---|---|
+| R0 Muon control (`NANO_BEAM=0`) | **2.288563** | — | 516.6 | 3.39 | 1377.9 | 18.15 |
+| R1 beam B=2 (`NANO_BEAM=1`) | 2.289732 | **+0.001169** | 1005.1 (~1.95x) | 4.68 | 1994.1 | 9.94 |
+
+- R0 reproduces the adopted Muon baseline (2.289139) to ~6e-4.
+- Eval trajectory R1 vs R0: step 750 2.349761 vs 2.349160; 900 2.307912 vs 2.306576;
+  1050 2.291802 vs 2.290776 — R1 behind at every checkpoint.
+- Beam diagnostics at end of training: `beam[cos:0.999245 rel:0.0624 sA:0.488]` — the two
+  streams stayed almost identical (cos ≈ 0.9992, ~6% relative gap) and the value head merged
+  ~50/50, so the beam never produced meaningfully different hypotheses. ACT also ran deeper
+  (avg_loops 3.39 → 4.68), adding compute without benefit.
+
+### Decision
+**Worse — not adopted.** Δ+0.001169 val_bpb at ~1.95x training time and +616 MB VRAM.
+Baseline unchanged: Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
+Plan mitigation (orthogonality penalty, `NANO_BEAM_ORTH_WEIGHT>0`) is available but low
+priority: stream collapse is the visible failure mode, yet any fix still pays ~2x compute.
+
+### Phase B status
+Phase B continuing — remaining avenue: RA-12 (optional later: RA-10 orth-penalty retry, Muon LR sweep).
+
+### Next session
+1. Archive `run_ra10_exp.sh` → `scripts/archive/` (RA-10 closed, not adopted).
+2. Start **RA-12** (last avenue in the queue).
+3. Optional later: RA-10 retry with `NANO_BEAM_ORTH_WEIGHT>0`; Muon LR sweep (0.01 / 0.04).
+4. Baseline remains Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
