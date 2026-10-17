@@ -1976,3 +1976,40 @@ Phase B continuing — remaining avenues: RA-10, RA-12.
 2. Start **RA-10** (next in queue after RA-14).
 3. Then RA-12. Optional later: Muon LR sweep (0.01 / 0.04).
 4. Baseline remains Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
+
+## Session Date: 2026-10-17 — RA-10 Continuous Latent Beam Search
+
+### Setup
+Daily session from the 2026-10-16 Next session pointer: archived `run_ra14_exp.sh` →
+`scripts/archive/` (61b0402), then started **RA-10 Continuous Latent Beam Search** on the
+Muon baseline. Baseline: Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref **2.289139 @1200**).
+Health: gx10-2cd8, GB10, driver 595.99.02, GPU idle at launch.
+
+### Paper / sources
+Saunshi et al., *Reasoning with Latent Thoughts: On the Power of Looped Transformers*
+(arXiv:2502.17416); plan `docs/research_plan/recursion_research_plan.md` Research Avenue 10.
+
+### Implementation
+- Env flags `NANO_BEAM` (default 0), `NANO_BEAM_SPLIT=1`, `NANO_BEAM_DELTA=0.05`,
+  `NANO_BEAM_ORTH_WEIGHT=0.0` (plan failure mitigation, off for R1).
+- Beam width 2, implemented inside `RecurrentBlock.forward` by doubling the batch at loop
+  `t == beam_split`: stream A = h, stream B = h + δ·rms(h)·unit-RMS(MLP_perturb(h))
+  (relative 5% perturbation from step 0, so B is never an exact copy). HC matrix Y, e, ACT
+  state (halted, cumulative_p, h_out), Parcae seq_depths, ponder/KV state are all doubled.
+- After the loop: per-token value head V (zero-init → exact 50/50 at step 0) scores the two
+  ACT outputs; softmax merge h = s_A·h_A + s_B·h_B before the coda. Eval uses the same path.
+- Split point: plan says T/2 with T=8, but ACT avg_loops is only ~2.4–3.4, so a t=4 (or t=2)
+  fork leaves most tokens halted before divergence (t=2 smoke: cos 1.0000). Using t=1 (≈ half
+  the effective depth). New params (perturb MLP + value head, 131,841) live under
+  `recurrent.beam_*` → AdamW (not Muon). Not combinable with MoR / latent CoT (beam auto-off).
+- Logs `beam[cos rel sA]` (mean cos and relative L2 gap of the two streams, mean weight on A).
+- Smoke (30 steps, R1 only, split=1): completed; val_bpb 3.215820 @30 (R0-path smoke
+  3.215818); cos 0.99958, rel gap 0.028 and rising; dt ~475 ms vs ~420 ms baseline (~+13%);
+  peak VRAM 1493 MB. `logs/ra10_smoke_runner.log`.
+- Code commit: `779b784` (RA-10 implementation + matched runner `run_ra10_exp.sh`).
+
+### Runs (1200-step matched, mb=8, ga=8, seq=512, lr=3e-4 cosine, MoD-on cap 0.5, HC K=4, Muon ON both)
+R0 = `NANO_MUON=1 NANO_BEAM=0`; R1 = `NANO_MUON=1 NANO_BEAM=1`. Only `NANO_BEAM` differs.
+Launched 2026-10-17 09:10 BST, runner PID 2130435.
+Logs: `logs/ra10_runner.log`, `logs/ra10_{R0_baseline1200,R1_beam1200}.log`.
+Results to be recorded at wrap-up.
