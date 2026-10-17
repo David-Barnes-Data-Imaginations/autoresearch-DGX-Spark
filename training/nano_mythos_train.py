@@ -100,6 +100,11 @@ class NanoMythosConfig:
     bigram: bool = False               # hash (prev, tok) table added before prelude via gate
     trigram: bool = False              # hash (prev2, prev1, tok) table; distinct primes
     bigram_table_mult: int = 5         # table size = mult * vocab_size (modded-nanogpt #62)
+    # --- RA-10: Continuous Latent Beam Search (Saunshi et al. arXiv:2502.17416 / plan Sec RA-10) ---
+    beam: bool = False                 # fork h into 2 latent streams mid-loop, value-head merge
+    beam_split: int = 1                # loop index t (0-based) at which streams fork (T_eff/2; ACT avg_loops ~2.4-3.4)
+    beam_delta: float = 0.05           # relative perturbation scale for stream B
+    beam_orth_weight: float = 0.0      # plan failure mitigation: (cos h_A,h_B)^2 penalty; 0 = off
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +677,25 @@ class RecurrentBlock(nn.Module):
         # RA-09: per-token ponder cost N + R (Graves ACT); ACT branch only.
         self.act_ponder = bool(cfg.act_ponder)
         self.last_ponder = None     # scalar tensor mean(N+R) over (B,T), keeps graph via R
+        # RA-10: continuous latent beam search (B=2). Stream A = h, stream B =
+        # h + delta * rms(h) * unit-RMS(MLP_perturb(h)) at loop beam_split; both
+        # run the remaining loops as a doubled batch; a per-token value head
+        # softmax-merges the two ACT outputs before the coda.
+        self.beam = bool(cfg.beam)
+        self.beam_split = int(cfg.beam_split)
+        self.beam_delta = float(cfg.beam_delta)
+        self.beam_orth_weight = float(cfg.beam_orth_weight)
+        if self.beam:
+            self.beam_perturb = nn.Sequential(
+                nn.Linear(cfg.dim, cfg.dim), nn.SiLU(), nn.Linear(cfg.dim, cfg.dim))
+            self.beam_value = nn.Linear(cfg.dim, 1)  # zero-init in _init_weights -> 50/50 merge
+        else:
+            self.beam_perturb = None
+            self.beam_value = None
+        self.last_beam_cos = None   # mean cos(h_A, h_B) of merged outputs (detached)
+        self.last_beam_sA = None    # mean merge weight on stream A (detached)
+        self.last_beam_orth = None  # orth penalty tensor (keeps graph) when weight > 0
+        self.last_beam_active = 0.0 # fraction of forwards where the fork happened
 
     def forward(self, h: torch.Tensor, e: torch.Tensor, freqs_cis: torch.Tensor, mask=None, n_loops=None, seq_depths=None) -> torch.Tensor:
         """n_loops: int (max loops, used at eval/inference).
@@ -752,9 +776,45 @@ class RecurrentBlock(nn.Module):
         else:
             Y = None
 
+        # RA-10: beam bookkeeping (batch dim doubles after the fork)
+        use_beam = self.beam and self.beam_perturb is not None and not use_mor and not self.latent_cot
+        beamed = False
+        beam_mult = 1.0
+        self.last_beam_cos = None
+        self.last_beam_rel = None
+        self.last_beam_sA = None
+        self.last_beam_orth = None
+        self.last_beam_active = 0.0
+
         for t in range(n_loops):
             if not still_running.any():
                 break
+            if use_beam and not beamed and t == self.beam_split:
+                # RA-10 fork: stream B = h + delta * rms(h) * unit-RMS(MLP(h)).
+                pert = self.beam_perturb(h)
+                pert = pert * torch.rsqrt(pert.pow(2).mean(-1, keepdim=True) + 1e-6)
+                h_rms = torch.sqrt(h.pow(2).mean(-1, keepdim=True) + 1e-6)
+                delta_h = self.beam_delta * h_rms * pert
+                h = torch.cat([h, h + delta_h], dim=0)
+                if use_hyperloop:
+                    # keep Y.mean(dim=2) == h for stream B
+                    Y = torch.cat([Y, Y + delta_h.unsqueeze(2)], dim=0)
+                e = torch.cat([e, e], dim=0)
+                halted = torch.cat([halted, halted], dim=0)
+                cumulative_p = torch.cat([cumulative_p, cumulative_p], dim=0)
+                h_out = torch.cat([h_out, h_out], dim=0)
+                still_running = torch.cat([still_running, still_running], dim=0)
+                seq_depths = torch.cat([seq_depths, seq_depths], dim=0)
+                if use_ponder:
+                    ponder_N = torch.cat([ponder_N, ponder_N], dim=0)
+                    ponder_R = torch.cat([ponder_R, ponder_R], dim=0)
+                if prev_k is not None:
+                    prev_k = torch.cat([prev_k, prev_k], dim=0)
+                    prev_v = torch.cat([prev_v, prev_v], dim=0)
+                B = h.shape[0]
+                beamed = True
+                beam_mult = 2.0
+                self.last_beam_active = 1.0
             # Baseline (ACT) branch: a position runs this iteration only if not
             # halted AND its sequence hasn't hit its sampled depth. MoR branch
             # keeps its own per-token still_running (depths > t), so don't
@@ -915,11 +975,31 @@ class RecurrentBlock(nn.Module):
                     h_out = h_out + completion_weight.unsqueeze(-1) * h
 
                 # Track how many positions used this loop iteration
-                loops_used_sum += still_running.float().sum().item()
+                # (RA-10: after the fork both streams count; divide by beam_mult)
+                loops_used_sum += still_running.float().sum().item() / beam_mult
 
                 if not (~halted & (seq_depths > (t + 1)).unsqueeze(-1)).any():
                     break
 
+        # RA-10 merge: per-token softmax over value-head scores of the two streams.
+        if beamed:
+            half = h_out.shape[0] // 2
+            hA, hB = h_out[:half], h_out[half:]
+            sc = torch.cat([self.beam_value(hA), self.beam_value(hB)], dim=-1)  # (B,T,2)
+            w = F.softmax(sc.float(), dim=-1).to(hA.dtype)
+            h_out = w[..., :1] * hA + w[..., 1:] * hB
+            cos = F.cosine_similarity(hA.float(), hB.float(), dim=-1, eps=1e-6)  # (B,T)
+            self.last_beam_cos = cos.detach().mean()
+            self.last_beam_rel = ((hA - hB).float().norm(dim=-1)
+                                  / (hA.float().norm(dim=-1) + 1e-6)).detach().mean()
+            self.last_beam_sA = w[..., 0].detach().float().mean()
+            if self.beam_orth_weight > 0:
+                self.last_beam_orth = cos.pow(2).mean()
+            seq_depths = seq_depths[:half]
+            if use_ponder:
+                ponder_N = 0.5 * (ponder_N[:half] + ponder_N[half:])
+                ponder_R = 0.5 * (ponder_R[:half] + ponder_R[half:])
+            B = half
         # ACT stats
         total_positions = B * T
         avg_loops = loops_used_sum / max(1, total_positions) if loops_used_sum > 0 else float(n_loops)
@@ -1029,6 +1109,18 @@ class NanoMythos(nn.Module):
         if getattr(self, "bigram_gate", None) is not None:
             with torch.no_grad():
                 self.bigram_gate.zero_()
+        # RA-10: value head zero-init -> exact 50/50 merge at step 0
+        _bv = getattr(self.recurrent, "beam_value", None) if hasattr(self, "recurrent") else None
+        if _bv is not None:
+            with torch.no_grad():
+                _bv.weight.zero_()
+                _bv.bias.zero_()
+        _bp = getattr(self.recurrent, "beam_perturb", None) if hasattr(self, "recurrent") else None
+        if _bp is not None:
+            with torch.no_grad():
+                for _m in _bp:
+                    if isinstance(_m, nn.Linear) and _m.bias is not None:
+                        _m.bias.zero_()
         if getattr(self, "trigram_gate", None) is not None:
             with torch.no_grad():
                 self.trigram_gate.zero_()
@@ -1115,6 +1207,11 @@ class NanoMythos(nn.Module):
             _pc = getattr(self.recurrent, "last_ponder", None)
             if (self.cfg.act_ponder and self.training and _pc is not None and reduction == "mean"):
                 loss = loss + self.cfg.ponder_tau * self._ponder_warm * _pc
+            # RA-10: optional orthogonality penalty (plan failure mitigation). Training-only.
+            _bo = getattr(self.recurrent, "last_beam_orth", None)
+            if (self.cfg.beam and self.cfg.beam_orth_weight > 0 and self.training
+                    and _bo is not None and reduction == "mean"):
+                loss = loss + self.cfg.beam_orth_weight * _bo
             return loss
         return logits
 
@@ -1230,6 +1327,11 @@ MUON_MOMENTUM = _env_float("NANO_MUON_MOMENTUM", 0.95)
 BIGRAM = _env_bool("NANO_BIGRAM", False)
 TRIGRAM = _env_bool("NANO_TRIGRAM", False)
 BIGRAM_TABLE_MULT = _env_int("NANO_BIGRAM_TABLE_MULT", 5)
+# RA-10: Continuous Latent Beam Search; default OFF
+BEAM = _env_bool("NANO_BEAM", False)
+BEAM_SPLIT = _env_int("NANO_BEAM_SPLIT", 1)
+BEAM_DELTA = _env_float("NANO_BEAM_DELTA", 0.05)
+BEAM_ORTH_WEIGHT = _env_float("NANO_BEAM_ORTH_WEIGHT", 0.0)
 CKPT_TAG = os.environ.get("NANO_CKPT_TAG", "final")
 # Estimate total steps from the time budget so the LR schedule decays to ~0 by
 # the end of a short run (the original hardcoded 999999 for the 24h run).
@@ -1250,7 +1352,9 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"latent_warm={LATENT_WARMUP_STEPS} act_ponder={ACT_PONDER} ponder_tau={PONDER_TAU} "
       f"ponder_warm={PONDER_WARMUP_STEPS} "
       f"muon={MUON} muon_lr={MUON_LR} muon_wd={MUON_WD} "
-      f"bigram={BIGRAM} trigram={TRIGRAM} bigram_mult={BIGRAM_TABLE_MULT} tag={CKPT_TAG}")
+      f"bigram={BIGRAM} trigram={TRIGRAM} bigram_mult={BIGRAM_TABLE_MULT} "
+      f"beam={BEAM} beam_split={BEAM_SPLIT} beam_delta={BEAM_DELTA} beam_orth={BEAM_ORTH_WEIGHT} "
+      f"tag={CKPT_TAG}")
 
 
 # ---------------------------------------------------------------------------
@@ -1313,6 +1417,10 @@ cfg = NanoMythosConfig(
     bigram=BIGRAM,
     trigram=TRIGRAM,
     bigram_table_mult=BIGRAM_TABLE_MULT,
+    beam=BEAM,
+    beam_split=BEAM_SPLIT,
+    beam_delta=BEAM_DELTA,
+    beam_orth_weight=BEAM_ORTH_WEIGHT,
 )
 
 with torch.device("meta"):
@@ -1344,6 +1452,10 @@ if BIGRAM or TRIGRAM:
     print(f"[RA-14] bigram={BIGRAM} trigram={TRIGRAM} table_size={_bg} "
           f"bigram_params={_bg_n:,} trigram_params={_tg_n:,} "
           f"(hash tables -> AdamW with token embeddings)")
+if BEAM:
+    _bp = sum(p.numel() for n, p in model.named_parameters() if ".beam_" in n)
+    print(f"[RA-10] beam=True width=2 split_t={BEAM_SPLIT} delta={BEAM_DELTA} "
+          f"orth_w={BEAM_ORTH_WEIGHT} beam_params={_bp:,} (perturb MLP + value head -> AdamW)")
 print(f"Model: NanoMythos")
 print(f"Parameters: {num_params:,} ({num_params / 1e6:.1f}M)")
 print(f"Config: {asdict(cfg)}")
@@ -1772,6 +1884,12 @@ while True:
     # RA-09: ponder cost mean(N+R) of the last micro-step
     _pond = getattr(model.recurrent, "last_ponder", None)
     _pond_str = f" | ponder[{_pond.item():.2f}]" if (cfg.act_ponder and _pond is not None) else ""
+    # RA-10: stream divergence + merge weight
+    _bcos = getattr(model.recurrent, "last_beam_cos", None)
+    _bsa = getattr(model.recurrent, "last_beam_sA", None)
+    _brel = getattr(model.recurrent, "last_beam_rel", None)
+    _pond_str += (f" | beam[cos:{float(_bcos):.6f} rel:{float(_brel) if _brel is not None else float('nan'):.4f} sA:{float(_bsa):.3f}]"
+                  if (cfg.beam and _bcos is not None and _bsa is not None) else "")
     print(
         f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lr: {lr:.6f} | "
         f"dt: {dt*1000:.0f}ms | tok/s: {tok_per_sec:,} | mfu: {mfu:.1f}% | "
