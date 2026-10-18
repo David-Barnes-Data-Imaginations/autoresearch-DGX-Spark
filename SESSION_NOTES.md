@@ -2042,3 +2042,27 @@ Phase B continuing — remaining avenue: RA-12 (optional later: RA-10 orth-penal
 2. Start **RA-12** (last avenue in the queue).
 3. Optional later: RA-10 retry with `NANO_BEAM_ORTH_WEIGHT>0`; Muon LR sweep (0.01 / 0.04).
 4. Baseline remains Parcae + RoPE + MoD-0.5 + HC K=4 + Muon (ref 2.289139 @1200).
+
+## Session Date: 2026-10-18 — NVIDIA Dory notes (project paused)
+
+### Project status
+- Project paused 2026-10-18 at David's request; daily routines paused.
+- Baseline stands: Parcae + RoPE + MoD-0.5 + Hyperloop HC K=4 + Muon, val_bpb 2.289139 @1200 steps.
+- Queue at pause: RA-12 next, then optional RA-10 orthogonality retry.
+
+### NVIDIA Nemotron-Labs Dory 1.0 4B
+- NVIDIA Nemotron-Labs Dory 1.0 4B, released 16 Oct 2026: https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16 (also NVFP4/MXFP8, collection https://huggingface.co/collections/nvidia/nemotron-labs-dory, licence OpenMDW-1.1).
+- No NVIDIA paper/arXiv found as of 18 Oct 2026 — methods below are from the model card only, vendor-reported.
+
+### Architecture / training (from model card only)
+- Architecture: looped nGPT, 8 input layers + shared 20-layer recurrent block + 8 output layers; input reinjected every loop; loop count is an inference setting 1/2/4 (2 recommended), effective depth 36–96 layers, same 4B weights; recurrent_kv_cache_mode='last_loop' keeps KV memory at 1-loop size.
+- Trained Megatron-LM on 6T tokens (NVFP4 first ~4.5T then BF16), 300B-token context extension to 256K, then SFT + multi-environment GRPO.
+- NVIDIA benchmarks rise loop1→2, flatten by 4 (e.g. SWE-bench Verified 50.3/59.5/61.8).
+
+### Relevance to this project
+- Relevance: validates shared-block looping at 4B scale, but uses fixed user-chosen loop counts rather than learned per-token halting (cf. RA-09 ACT collapse to ~1.5/8 loops). Input reinjection each loop is another cheap candidate.
+
+### Research queue addition
+- Queue at pause remains: RA-12 next, then optional RA-10 orthogonality retry.
+- **RA-15 Fixed loop-count sweep (Dory-style)** — queued, not started: disable adaptive halting (no ACT/MoD early exit) and run matched 1200-step pairs/triples at fixed loop counts (e.g. NANO_FIXED_LOOPS=2 vs 4 vs current adaptive baseline, all NANO_MUON=1), measuring val_bpb and step time; question is whether a fixed budget beats adaptive halting at equal compute. Keep env-gated/off by default.
+- Note routines are paused, so this runs only when David restarts the project.
