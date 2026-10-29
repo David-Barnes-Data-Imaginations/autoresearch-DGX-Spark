@@ -1,5 +1,8 @@
 # Session Notes — Speedrun Training
 
+> Overall plan: see PLAN.md (goal, decisions, queue, scale path, data, routine, constraints).
+
+
 ## Research Avenue Progress Tracker (RA-01 to RA-12)
 
 > Maintained per the autonomous research protocol. Status: not-started | in-progress (N/5) | completed | exhausted.

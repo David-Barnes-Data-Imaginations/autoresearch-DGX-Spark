@@ -65,3 +65,16 @@ Running: scripts/lit_scan.py (arXiv + HF, 200 candidate items) → LITERATURE_SC
 ## Auxiliary LLM resources (for LLM-heavy side tasks, only when David OKs)
 - Spark 2 Nemotron via Hermes: vLLM server http://100.82.91.70:8000/v1, model id nemotron-3.5-super-vl (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4), the same endpoint Hermes (Jetson) uses. Used for the 2026-10 literature scan with David\x27s OK; do not restart/reload it.
 - Spark 1 alternatives: `sparkrun list` then `sparkrun run <modelcode>` boots other models (e.g. Qwen 3.8 27B FP8). Don\x27t boot during a training run.
+
+## Dory config.json + vLLM implementation (published artifacts, read 2026-10-29)
+Sources: config.json in the HF repo (cached on Spark 2) and vLLM dory.py (vllm-project/vllm PR #60149, as installed in the Spark 2 vllm_node container).
+- num_hidden_layers 72 counts attention and MLP separately: n_input_layers 16 / n_recurrent_layers 40 / n_output_layers 16 sub-layers = 8 / 20 / 8 blocks (matches the card).
+- hidden 2560, 16 heads / 4 KV heads, head_dim 256, SwiGLU 7168, vocab 131072, untied embeddings; default n_recurrent_loops 2.
+- Attention: sliding window 1024 with every 4th attention layer full (3:1); RoPE theta 1e4 (SWA) vs 1e7 (full); qk-norm after RoPE; sigmoid output gate.
+- nGPT: every residual update is a normalised slerp: h = norm(h + |alpha·scale|·(norm(out) − h)), learnable per-channel alpha (ngpt_alpha_init 0.05, scaled by 1/initializer_range 0.0177); learnable logit scale.
+- **Loop / reinjection:** state = input_h; for each loop: h = norm(state + input_h); run the 20 recurrent blocks; state = norm(h). Then the output blocks. → additive reinjection of the prelude output with unit-norm states and no learned gate (cf. our LTI injection).
+- KV cache per loop ("LoopCoder virtual layer indices") or last-loop.
+- Still unpublished: training loop schedule, halting, LR/warmup.
+- Testable ideas: (a) NANO_NGPT-style unit-norm states + slerp residual alpha as a loop stabiliser (RA-20 candidate); (b) Dory reinjection norm(state+e) vs our LTI injection (RA-21 candidate); (c) SWA:full 3:1 in the looped block.
+
+See PLAN.md for the overall plan; DORY_SELF_PROBE.md for the self-knowledge probe.

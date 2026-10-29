@@ -1,5 +1,8 @@
 # SCALE_PLAN — nano_mythos looped transformer: small → mid → 1B
 
+> Overview: PLAN.md. Detailed log: SESSION_NOTES.md.
+
+
 Written 2026-10-29. Hardware: DGX Spark GB10, 128 GB unified memory, ~40 TFLOPS BF16 peak each; we measure ~18–25% MFU on the nano model. Spark 2 is used ONLY at Stage 3 and only when David starts it.
 
 ## Compute model
