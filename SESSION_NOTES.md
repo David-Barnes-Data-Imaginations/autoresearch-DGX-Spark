@@ -2066,3 +2066,24 @@ Phase B continuing — remaining avenue: RA-12 (optional later: RA-10 orth-penal
 - Queue at pause remains: RA-12 next, then optional RA-10 orthogonality retry.
 - **RA-15 Fixed loop-count sweep (Dory-style)** — queued, not started: disable adaptive halting (no ACT/MoD early exit) and run matched 1200-step pairs/triples at fixed loop counts (e.g. NANO_FIXED_LOOPS=2 vs 4 vs current adaptive baseline, all NANO_MUON=1), measuring val_bpb and step time; question is whether a fixed budget beats adaptive halting at equal compute. Keep env-gated/off by default.
 - Note routines are paused, so this runs only when David restarts the project.
+
+## Session Date: 2026-10-29 — Project restarted: RA-15 fixed loop count (Dory-style) + depth variables
+
+### Setup
+- Project restarted at David's request. Archived run_ra10_exp.sh → scripts/archive/. RA-12 deferred (still in queue) in favour of RA-15/16 per David.
+- Dory comparison, citations and video-search notes: DORY_NOTES.md. Key fact: the Dory card publishes inference loop counts (1–4, 2 recommended) but NOT the training loop schedule.
+
+### Implementation (env-gated, defaults = baseline)
+- NANO_FIXED_LOOPS=N: exactly N loops train+eval, ACT halting off (output = final-loop state), Poisson depth sampling off. MoD-0.5 still active.
+- NANO_RECUR_LAYERS=k (default 1), NANO_PRELUDE_LAYERS / NANO_CODA_LAYERS (default 2/2). Startup log prints fixed_loops/prelude/recur_layers/coda/eff_depth.
+- Runner run_ra15_exp.sh: R0 adaptive baseline, R1 fixed 2, R2 fixed 4, R3 fixed 8 (all Muon, 1200 steps, mb8 ga8 seq512 lr3e-4 cosine). RA15_ONLY selects arms; NANO_RECUR_LAYERS etc. pass through.
+- Smoke (30 steps): R0 avg_loops 2.25/8; fixed-4 avg_loops 4.00/4; recur_layers=2 smoke (lr 3e-3) R0 3.018723 vs fixed-4 3.020025 — code paths work.
+
+### Runs
+- Full RA-15 launched 2026-10-29 evening, detached: nohup bash run_ra15_exp.sh > logs/ra15_full.log. Per-arm logs logs/ra15_R{0..3}_*1200.log. Expected ~1.5–2 h total.
+
+### Next session (single daily session, 9:52 UK)
+1. If logs/ra15_full.log contains "RA15 RUNS COMPLETE": record R0–R3 (val_bpb, train time, avg_loops, MFU) in results.tsv + a Results/Decision section here. Compare fixed-N vs R0 at roughly matched compute (R0 averages ~2.3 loops → fixed 2 is compute-matched; fixed 4/8 spend more). Also note run-to-run stability.
+2. Then RA-16 depth × loops: use best fixed N from RA-15 (default 4 if unclear); runs: NANO_RECUR_LAYERS=1 vs 2 vs 4 at that N (RA15_ONLY / env), and one "unrolled-equivalent" arm (e.g. recur_layers=2, N/2 loops) to compare looped vs unrolled depth at equal effective depth. Each arm ~20–40 min; 2–3 arms per session.
+3. Candidate RA-17: ELT-style intra-loop self-distillation (random shorter student loop count) for elastic loop counts (see DORY_NOTES.md).
+4. Baseline remains Parcae+RoPE+MoD-0.5+HC K=4+Muon (ref 2.289139 @1200) until RA-15 says otherwise.

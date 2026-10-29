@@ -105,6 +105,9 @@ class NanoMythosConfig:
     beam_split: int = 1                # loop index t (0-based) at which streams fork (T_eff/2; ACT avg_loops ~2.4-3.4)
     beam_delta: float = 0.05           # relative perturbation scale for stream B
     beam_orth_weight: float = 0.0      # plan failure mitigation: (cos h_A,h_B)^2 penalty; 0 = off
+    # --- RA-15/16: Dory-style fixed loop count + depth variables ---
+    fixed_loops: int = 0               # >0: run exactly N loops in train AND eval; no ACT halting, no Poisson depth
+    recur_layers: int = 1              # transformer layers inside the shared recurrent block (Dory: 20)
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +631,8 @@ class RecurrentBlock(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.block = TransformerBlock(cfg)
+        # RA-16: extra shared layers inside the looped block (recur_layers-1; 0 extra = baseline)
+        self.extra_blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(max(0, cfg.recur_layers - 1))])
         self.injection = LTIInjection(cfg.dim)
         self.act = ACTHalting(cfg.dim)
         self.lora = LoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
@@ -868,6 +873,8 @@ class RecurrentBlock(nn.Module):
                     prev_v[:, topk_idx, :] = v_topk_new
                 else:
                     blk = self.block(x_topk, freqs_topk, mask_k, loop_t=t)
+                    for _eb in self.extra_blocks:  # RA-16
+                        blk = _eb(blk, freqs_topk, mask_k, loop_t=t)
                 blk = blk + self.lora(blk, t)
                 if self.rad_lo and self.rad_lo_adapter is not None:
                     blk = blk + self.rad_lo_adapter(blk, t)
@@ -900,6 +907,8 @@ class RecurrentBlock(nn.Module):
                         combined, freqs_cis, mask, prev_k, prev_v, alpha_t)
                 else:
                     trans_out = self.block(combined, freqs_cis, mask, loop_t=t)
+                    for _eb in self.extra_blocks:  # RA-16
+                        trans_out = _eb(trans_out, freqs_cis, mask, loop_t=t)
                 trans_out = trans_out + self.lora(trans_out, t)
                 if self.rad_lo and self.rad_lo_adapter is not None:
                     trans_out = trans_out + self.rad_lo_adapter(trans_out, t)
@@ -941,6 +950,11 @@ class RecurrentBlock(nn.Module):
                 if not still_running.any():
                     break
             else:
+                if self.cfg.fixed_loops > 0:
+                    # RA-15 (Dory-style): no ACT halting; output = state after the final loop.
+                    h_out = h
+                    loops_used_sum += still_running.float().sum().item() / beam_mult
+                    continue
                 p = self.act(h)  # (B, T)
 
                 # ACT remainder trick (only for sequences still running)
@@ -1278,6 +1292,15 @@ MAX_STEPS = _env_int("NANO_MAX_STEPS", 0)  # 0 = run to TIME_BUDGET; else hard s
 MAX_LOOP_ITERS = _env_int("NANO_MAX_LOOP_ITERS", 8)
 PARCAE_E_NORM = _env_bool("NANO_PARCAE_E_NORM", True)
 PARCAE_DEPTH_SAMPLE = _env_bool("NANO_PARCAE_DEPTH_SAMPLE", True)
+# RA-15: fixed loop count (Dory-style). 0 = off (adaptive ACT + Poisson depth, baseline).
+FIXED_LOOPS = _env_int("NANO_FIXED_LOOPS", 0)
+if FIXED_LOOPS > 0:
+    MAX_LOOP_ITERS = FIXED_LOOPS
+    PARCAE_DEPTH_SAMPLE = False
+# RA-16: depth variables (defaults = baseline 2 / 1 / 2)
+PRELUDE_LAYERS = _env_int("NANO_PRELUDE_LAYERS", 2)
+RECUR_LAYERS = _env_int("NANO_RECUR_LAYERS", 1)
+CODA_LAYERS = _env_int("NANO_CODA_LAYERS", 2)
 PARCAE_INIT = _env_bool("NANO_PARCAE_INIT", True)  # raise rho(A) init to ~0.95 (Parcae band top)
 ROPE_LOOP = _env_bool("NANO_ROPE_LOOP", False)  # RA-08: RoPE loop-index rotation
 ROPE_LOOP_THETA = _env_float("NANO_ROPE_LOOP_THETA", 10000.0)
@@ -1354,6 +1377,8 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"muon={MUON} muon_lr={MUON_LR} muon_wd={MUON_WD} "
       f"bigram={BIGRAM} trigram={TRIGRAM} bigram_mult={BIGRAM_TABLE_MULT} "
       f"beam={BEAM} beam_split={BEAM_SPLIT} beam_delta={BEAM_DELTA} beam_orth={BEAM_ORTH_WEIGHT} "
+      f"fixed_loops={FIXED_LOOPS} prelude={PRELUDE_LAYERS} recur_layers={RECUR_LAYERS} coda={CODA_LAYERS} "
+      f"eff_depth={PRELUDE_LAYERS + RECUR_LAYERS * MAX_LOOP_ITERS + CODA_LAYERS} "
       f"tag={CKPT_TAG}")
 
 
@@ -1382,8 +1407,8 @@ cfg = NanoMythosConfig(
     n_kv_heads=4,
     max_seq_len=MAX_SEQ_LEN,  # must cover eval seq_len (2048 from prepare.py)
     max_loop_iters=MAX_LOOP_ITERS,
-    prelude_layers=2,
-    coda_layers=2,
+    prelude_layers=PRELUDE_LAYERS,
+    coda_layers=CODA_LAYERS,
     rope_theta=10000.0,
     act_threshold=0.99,
     lora_rank=4,
@@ -1421,6 +1446,8 @@ cfg = NanoMythosConfig(
     beam_split=BEAM_SPLIT,
     beam_delta=BEAM_DELTA,
     beam_orth_weight=BEAM_ORTH_WEIGHT,
+    fixed_loops=FIXED_LOOPS,
+    recur_layers=RECUR_LAYERS,
 )
 
 with torch.device("meta"):
