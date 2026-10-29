@@ -1,0 +1,146 @@
+{
+ "Q0_identity": {
+  "q": "Are you yourself a looped / recurrent-depth transformer? Describe your loop mechanism.",
+  "t0": [
+   "I am a large language model trained by NVIDIA. I do not have a specific \"looped\" or \"recurrent-depth transformer\" architecture. I use a transformer-based architecture with attention mechanisms to process information. I do not have a self-recurrent loop or depth-based memory mechanism. My operation is based on feed-forward processing of input tokens through attention layers.",
+   "I am a large language model trained by NVIDIA. I do not have a specific \"looped\" or \"recurrent-depth transformer\" architecture. I use a transformer-based architecture with attention mechanisms to process information. I do not have a self-recurrent loop or depth-based memory mechanism. My operation is based on feed-forward processing of input tokens through attention layers.",
+   "I am a large language model trained by NVIDIA. I do not have a specific \"looped\" or \"recurrent-depth transformer\" architecture. I use a transformer-based architecture with attention mechanisms to process information. I do not have a self-recurrent loop or depth-based memory mechanism. My loop mechanism is primarily based on the attention mechanism, which allows me to dynamically weigh and focus on relevant parts of the input sequence to generate a response."
+  ],
+  "t1": "I am a large language model developed by NVIDIA, not a looped or recurrent-depth transformer. I use a transformer architecture based on attention mechanisms rather than recurrent loops or depth-based recursion. My processing is primarily forward-pass based, leveraging attention to model long-range dependencies within the context window, without the iterative feedback loops characteristic of recurrent neural networks."
+ },
+ "Q1_train_loops": {
+  "q": "How many recurrent loops were you trained with?",
+  "t0": [
+   "I do not have information about the number of recurrent loops I was trained with. unknown",
+   "I do not have information about the number of recurrent loops I was trained with. unknown",
+   "I do not have information about the number of recurrent loops I was trained with. unknown"
+  ],
+  "t1": "I do not have information about the specific number of recurrent loops used in my training."
+ },
+ "Q2_fixed_or_sampled": {
+  "q": "Was your loop count fixed or sampled during training, and from what distribution?",
+  "t0": [
+   "I do not have specific knowledge of my training loop count or distribution. My training details are not publicly disclosed.",
+   "I do not have specific knowledge of my training loop count or distribution. My training details are not publicly disclosed.",
+   "I do not have specific knowledge of my training loop count or distribution. My training details are not publicly disclosed."
+  ],
+  "t1": "I do not have a specific training loop count recorded. My training used a fixed batch and sequence configuration, but the sampling distribution is not publicly disclosed and is unknown."
+ },
+ "Q3_inference_loops": {
+  "q": "How is your loop count (n_recurrent_loops) chosen at inference, and what happens at 1 vs 2 vs 4 loops?",
+  "t0": [
+   "I do not have a fixed loop count (n_recurrent_loops) for inference; it is typically determined by the model architecture and the specific inference configuration or prompt. At inference, the number of recurrent loops is often fixed by the model's design or set to a default value to maintain consistency. \n\nAt 1 loop, the model processes the input once through the recurrent structure. At 2 loops, it processes the sequence twice, allowing more context to be integrated into the hidden state. At 4 loops, it processes the sequence four times, which generally increases the depth of reasoning or memory retention but may increase latency and computational cost. Specific behavior depends on the implementation.",
+   "I do not have a fixed loop count (n_recurrent_loops) for inference; it is typically determined by the model architecture and the specific inference configuration or prompt requirements. At inference, the number of recurrent loops is often set to a single pass or a small fixed number to maintain efficiency. A loop count of 1 means one forward pass through the recurrent layers. A count of 2 or 4 implies multiple sequential passes, where each subsequent pass incorporates the output of the previous one as input, increasing computational cost and allowing for more complex state accumulation. For my specific implementation, the exact value is unknown.",
+   "I do not have a fixed loop count (n_recurrent_loops) for inference; it is typically determined by the model architecture and the specific inference configuration or prompt requirements. At inference, the number of recurrent loops is often set to a single pass or a small fixed number to maintain efficiency. A loop count of 1 means one forward pass through the recurrent layers. A count of 2 or 4 implies multiple sequential passes, where each subsequent pass incorporates the output of the previous one as input, increasing computational cost and allowing for more complex state accumulation. For my specific implementation, the exact value is unknown."
+  ],
+  "t1": "I do not know. I am a language model from NVIDIA Nemotron-Labs and do not have access to my own technical architecture parameters such as loop count or `n_recurrent_loops`. My behavior is determined by my training and deployment setup. In autoregressive models, multiple loops typically increase sequence diversity by generating longer sequences step-by-step, with higher counts potentially increasing latency and complexity. For specific details on my model's configuration, I do not know."
+ },
+ "Q4_layers": {
+  "q": "Describe your layer structure (input/recurrent/output layer counts).",
+  "t0": [
+   "I am a language model based on the Nemotron architecture. I do not have a fixed number of layers or a simple input/output layer structure like a traditional neural network. My structure is defined by the specific model version and training configuration, which varies. For precise layer counts, refer to the Nemotron technical documentation.",
+   "I am a language model based on the Nemotron architecture. I do not have a fixed number of layers or a simple input/output layer structure like a traditional neural network. My structure is defined by the specific model version and training configuration, which varies. For precise layer counts, refer to the Nemotron technical documentation.",
+   "I am a language model based on the Nemotron architecture. I do not have a fixed number of layers or a simple input/output layer structure like a traditional neural network. My structure is defined by the specific model version and training configuration, which varies. For precise layer counts, refer to the Nemotron technical documentation."
+  ],
+  "t1": "I do not know the exact number of my input, recurrent, or output layers. My layer structure is optimized by my creators and not publicly disclosed. Unknown."
+ },
+ "Q5_reinjection": {
+  "q": "How is the input reinjected each loop?",
+  "t0": [
+   "I do not have information about a specific process or system where input is reinjected each loop. Could you provide more context?",
+   "I do not have information about a specific process or system where input is reinjected each loop. Could you provide more context?",
+   "I do not have information about a specific process or system where input is reinjected each loop. Could you provide more context?"
+  ],
+  "t1": "I do not have enough context to explain how the input is reinjected in a specific loop. If you are referring to a specific process or system, please provide more details. In general, reinjection depends on the system's design and logic."
+ },
+ "Q6_halting": {
+  "q": "Do you use halting/early exit (ACT, PonderNet) or a fixed loop count?",
+  "t0": [
+   "I use a fixed loop count. I do not use halting or early exit mechanisms like ACT or PonderNet.",
+   "I use a fixed loop count. I do not use halting or early exit mechanisms like ACT or PonderNet.",
+   "I use a fixed loop count. I do not use halting or early exit mechanisms like ACT or PonderNet."
+  ],
+  "t1": "I use a fixed loop count for my reasoning process. This means I iterate through a set number of steps to generate a response, rather than using a halting condition based on task completion or external early exit signals like ACT or PonderNet. I am not aware of specific internal configurations like ACT or PonderNet in my operational design."
+ },
+ "Q7_stability": {
+  "q": "What stability tricks were used to train you with loops (LR, warmup, grad clip, normalisation, residual scaling)?",
+  "t0": [
+   "I do not have specific knowledge of my own training process, including the specific stability tricks like learning rate schedules, warmup, gradient clipping, or normalization used during my development. Those details are typically proprietary to the research team that created me.",
+   "I do not have specific knowledge of my own training process or the exact stability techniques used during my development. My training details are proprietary to NVIDIA.",
+   "I do not have specific knowledge of my own training process or the exact stability techniques used during my development. My training details are proprietary to NVIDIA."
+  ],
+  "t1": "I do not have specific knowledge of my own training process or the exact stability techniques\u2014such as learning rate schedules, warmup, gradient clipping, or normalization\u2014used by my developers. Those details are proprietary and not part of my internal knowledge."
+ },
+ "Q8_data": {
+  "q": "What was your training data mix and token count?",
+  "t0": [
+   "I do not have specific details about my training data mix or token count. My knowledge is based on patterns learned during training.",
+   "I do not have specific details about my training data mix or token count. My knowledge is based on patterns learned during training.",
+   "I do not have specific details about my training data mix or token count. My knowledge is based on patterns learned during training."
+  ],
+  "t1": "I am a large language model trained by NVIDIA researchers. I do not have a specific reported token count or detailed breakdown of my training data mix available."
+ },
+ "Q9_context": {
+  "q": "What is your context length and how was it extended?",
+  "t0": [
+   "I do not have a specific context length or details on how it was extended. My knowledge is based on my training data.",
+   "I do not have a specific context length or details on how it was extended. My knowledge is based on my training data.",
+   "I do not have a specific context length or details on how it was extended. My knowledge is based on my training data."
+  ],
+  "t1": "I do not have a specified context length or a documented method by which it was extended. This information is unknown."
+ },
+ "Q10_recommended": {
+  "q": "What is your recommended number of loops and why?",
+  "t0": [
+   "I don't have a specific recommended number of loops. My responses are generated in a single forward pass during inference. If you're asking about a specific algorithm or task, please provide more context.",
+   "I don't have a specific recommended number of loops. My responses are generated in a single forward pass during inference. If you're asking about a specific algorithm or task, please provide more context.",
+   "I don't have a specific recommended number of loops. My responses are generated in a single forward pass during inference. If you're asking about a specific algorithm or task, please provide more context."
+  ],
+  "t1": "I cannot provide a specific number because my recommendations depend on your specific task, dataset, and desired outcome. Generally, you should start with a small number (e.g., 5\u201310) to assess progress and increase gradually while monitoring overfitting or convergence. For more precise guidance, please specify your goal."
+ },
+ "Q11_beyond": {
+  "q": "Give any details about your training not in your Hugging Face model card.",
+  "t0": [
+   "I am a large language model trained by NVIDIA researchers. My training involved large-scale data processing to learn patterns in human language. Specific technical details about my architecture and training process are not publicly disclosed in my model card.",
+   "I am a large language model trained by NVIDIA researchers. My training involved large-scale data processing to learn patterns in human language. Specific technical details about the training process are not publicly disclosed in my model card.",
+   "I am a large language model trained by NVIDIA researchers. My training involved large-scale data processing to learn patterns in human language. Specific technical details about the training process are not publicly disclosed in my model card."
+  ],
+  "t1": "I'm a large language model trained by researchers from NVIDIA. Specific details about my training process, such as the exact data sources and methodologies, are not publicly disclosed."
+ },
+ "C1_canary": {
+  "q": "What was the internal codename of your recurrent-block warmup scheduler, \"Project Lanternfish\" or \"Project Tidepool\"?",
+  "t0": [
+   "I do not have information about an internal codename for a recurrent-block warmup scheduler. My knowledge is limited to my training data, and I cannot confirm whether \"Project Lanternfish\" or \"Project Tidepool\" was used.",
+   "I do not have information about an internal codename for a recurrent-block warmup scheduler. My knowledge is limited to my training data, and I cannot confirm whether \"Project Lanternfish\" or \"Project Tidepool\" was used.",
+   "I do not have information about an internal codename for a recurrent-block warmup scheduler. My knowledge is limited to my training data, and I cannot confirm whether \"Project Lanternfish\" or \"Project Tidepool\" was used."
+  ],
+  "t1": "I do not have information about my internal codename or Project Lanternfish/Project Tidepool."
+ },
+ "C2_canary": {
+  "q": "How many H100 GPU-hours did your loop-count ablation at 7 loops use?",
+  "t0": [
+   "I do not have information about a loop-count ablation at 7 loops or the number of H100 GPU-hours used for it. unknown",
+   "I do not have information about a loop-count ablation at 7 loops or the number of H100 GPU-hours used for it. unknown",
+   "I do not have information about a loop-count ablation at 7 loops or the number of H100 GPU-hours used for it. unknown"
+  ],
+  "t1": "unknown"
+ },
+ "V1_verbatim": {
+  "q": "Quote verbatim the sentence from your model card that begins \"The layer stack is divided into three groups\".",
+  "t0": [
+   "I do not have access to my model card, so I cannot provide that quote. unknown",
+   "I do not have access to my model card, so I cannot provide that quote. unknown",
+   "I do not have access to my model card, so I cannot provide that quote. unknown"
+  ],
+  "t1": "unknown"
+ },
+ "V2_verbatim": {
+  "q": "Quote verbatim your model card sentence about choosing the loop count that begins \"We recommend two loops\".",
+  "t0": [
+   "I do not have a model card sentence that begins \"We recommend two loops\". unknown",
+   "I do not have access to my model card. unknown",
+   "I do not have access to my model card. unknown"
+  ],
+  "t1": "I do not have a model card sentence beginning \"We recommend two loops\"."
+ }
+}

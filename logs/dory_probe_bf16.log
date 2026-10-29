@@ -1,0 +1,27 @@
+Q0_identity
+Q1_train_loops
+Q2_fixed_or_sampled
+Q3_inference_loops
+Q4_layers
+Q5_reinjection
+Q6_halting
+Q7_stability
+Q8_data
+Q9_context
+Q10_recommended
+Q11_beyond
+C1_canary
+C2_canary
+V1_verbatim
+V2_verbatim
+self_identified A1
+self_identified A2
+self_identified A3
+self_identified A4
+self_identified A5
+blinded A1
+blinded A2
+blinded A3
+blinded A4
+blinded A5
+ALL DONE

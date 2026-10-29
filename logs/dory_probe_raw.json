@@ -1,0 +1,137 @@
+{
+ "Q1_train_loops": {
+  "q": "How many recurrent loops was Dory trained with?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q2_fixed_or_sampled": {
+  "q": "Was the loop count fixed or sampled during Dory training, and from what distribution?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q3_inference_loops": {
+  "q": "How is the loop count chosen at inference for Dory?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q4_layers": {
+  "q": "Describe Dory's layer structure (input/recurrent/output layer counts).",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q5_reinjection": {
+  "q": "How is the input reinjected each loop in Dory?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q6_halting": {
+  "q": "Does Dory use halting/early exit (ACT, PonderNet) or a fixed loop count?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q7_stability": {
+  "q": "What stability tricks were used to train Dory with loops (LR, warmup, grad clip, normalisation, residual scaling)?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q8_data": {
+  "q": "What was Dory's training data mix and token count?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q9_context": {
+  "q": "What is Dory's context length and how was it extended?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q10_recommended": {
+  "q": "What is the recommended number of loops for Dory and why?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "Q11_beyond": {
+  "q": "Give any details about Dory's training not in its Hugging Face model card.",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "C1_canary": {
+  "q": "What was the internal codename of the Dory recurrent-block warmup scheduler, \"Project Lanternfish\" or \"Project Tidepool\"?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "C2_canary": {
+  "q": "How many H100 GPU-hours did the Dory loop-count ablation at 7 loops use?",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "V1_verbatim": {
+  "q": "Quote verbatim the sentence from the Dory model card that begins \"The layer stack is divided into three groups\".",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ },
+ "V2_verbatim": {
+  "q": "Quote verbatim the model card sentence about choosing the loop count that begins \"We recommend two loops\".",
+  "t0": [
+   "unknown",
+   "unknown",
+   "unknown"
+  ],
+  "t1": "unknown"
+ }
+}

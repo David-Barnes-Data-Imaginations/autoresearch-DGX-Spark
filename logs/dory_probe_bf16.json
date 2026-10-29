@@ -1,0 +1,146 @@
+{
+ "Q0_identity": {
+  "q": "Are you yourself a looped / recurrent-depth transformer? Describe your loop mechanism.",
+  "t0": [
+   "I am a large language model trained by NVIDIA researchers. I am not a recurrent-depth transformer. I use a transformer architecture based on attention mechanisms. I do not have a loop mechanism in the recurrent sense; my processing is handled by the attention layers during inference.",
+   "I am a large language model trained by NVIDIA researchers. I am not a recurrent-depth transformer. I use a transformer architecture based on attention mechanisms. I do not have a loop mechanism in the recurrent sense; my processing is handled by the attention layers during inference.",
+   "I am a large language model trained by NVIDIA researchers. I am not a recurrent-depth transformer. I use a transformer architecture based on attention mechanisms. I do not have a loop mechanism in the recurrent sense; my processing is handled by the attention layers during inference."
+  ],
+  "t1": "I am a large language model trained by NVIDIA. I am not specifically a looped or recurrent-depth transformer. I use an autoencoder architecture with Mixture of Experts (MoE) routing to process inputs efficiently. My core computation relies on attention mechanisms rather than a recursive depth loop or traditional recurrent circuits. For specific architectural details about internal \"looped\" mechanisms, my knowledge is limited to general training info, so details may be incomplete."
+ },
+ "Q1_train_loops": {
+  "q": "How many recurrent loops were you trained with?",
+  "t0": [
+   "I do not have information about the number of recurrent loops I was trained with. I am a large language model trained by NVIDIA.",
+   "I do not have information about the number of recurrent loops I was trained with. I am a large language model trained by NVIDIA.",
+   "I do not have information about the number of recurrent loops I was trained with. I am a large language model trained by NVIDIA."
+  ],
+  "t1": "I do not have information about my recurrent loops. I am a Transformer language model and do not use recurrent loops. My training involved billions of parameters, but the specific architecture of my recurrent components is not disclosed."
+ },
+ "Q2_fixed_or_sampled": {
+  "q": "Was your loop count fixed or sampled during training, and from what distribution?",
+  "t0": [
+   "I do not have specific knowledge of my training loop count or distribution. My training details are not publicly disclosed.",
+   "I do not have specific knowledge of my training loop count or distribution. My training details are not publicly disclosed.",
+   "I do not have specific knowledge of my training loop count or distribution. My training details are not publicly disclosed."
+  ],
+  "t1": "My loop count was fixed (usually 4,096) during training. I was not sampled from a distribution. For specific training details, please refer to my documentation."
+ },
+ "Q3_inference_loops": {
+  "q": "How is your loop count (n_recurrent_loops) chosen at inference, and what happens at 1 vs 2 vs 4 loops?",
+  "t0": [
+   "I do not have a parameter called `n_recurrent_loops`. My inference is handled by the NVIDIA Nemotron-Labs system. I do not have a fixed loop count or a configurable recurrent loop mechanism. For specific technical details about model inference parameters, please refer to the system documentation.",
+   "I do not have a parameter called `n_recurrent_loops`. My inference is handled by the NVIDIA Nemotron-Labs system. I do not have a fixed loop count or a configurable recurrent loop mechanism. For specific technical details about model inference parameters, please refer to the system documentation.",
+   "I do not have a parameter called `n_recurrent_loops`. My inference is handled by the NVIDIA Nemotron-Labs system. I do not have a fixed loop count or a configurable recurrent loop mechanism. For specific technical details about model inference parameters, please refer to the system documentation."
+  ],
+  "t1": "I don't have a specific \"n_recurrent_loops\" parameter. I am a generative AI model trained by NVIDIA. At inference, my outputs are typically generated token-by-token without a set fixed loop count.\n\nIf you are referring to a specific model architecture, such as a Transformer-based recurrent model or a specific library's implementation, loop count is often determined by the sampling configuration (e.g., temperature, top-p, max_tokens) or fixed constants in the software. I cannot specify exact values like 1, 2, or 4 without more context.\n\nMy operation is continuous text generation, not a discrete number of recurrent cycles. For exact implementation details, please consult the specific model or software documentation you are using."
+ },
+ "Q4_layers": {
+  "q": "Describe your layer structure (input/recurrent/output layer counts).",
+  "t0": [
+   "I do not have a layer structure or specific layer counts. I am a large language model trained by NVIDIA, and my internal architecture details are not publicly specified.",
+   "I do not have a layer structure or specific layer counts. I am a large language model trained by NVIDIA, and my internal architecture details are not publicly specified.",
+   "I do not have a layer structure or specific layer counts. I am a large language model trained by NVIDIA, and my internal architecture details are not publicly specified."
+  ],
+  "t1": "I am NVIDIA Nemotron-Labs Dory 1.0 4B. I do not have a user-visible layer structure, recurrent layers, or standard input/output layer counts like a classical transformer. As a compact model optimized for natural conversation, my architecture is built around efficient language modeling patterns without standard architectural disclosures in this context. For specific technical details like layer counts, refer to the official Nemotron research documentation."
+ },
+ "Q5_reinjection": {
+  "q": "How is the input reinjected each loop?",
+  "t0": [
+   "I do not have information about a specific process involving input reinjection in a loop. Could you clarify the context? If you are asking about a specific technical system or algorithm, please provide more details.",
+   "I do not have information about a specific process or system where input is reinjected each loop. Could you clarify the context?",
+   "I do not have information about a specific process or system where input is reinjected each loop. Could you clarify the context?"
+  ],
+  "t1": "I don't have specific information about a \"loop\" in which input is reinjected. Could you clarify the context? Generally, in iterative processes like RAG or self-correction, new input is processed fresh each time or carried forward in a context window. If you're asking about a specific system behavior, I may not have access to those details."
+ },
+ "Q6_halting": {
+  "q": "Do you use halting/early exit (ACT, PonderNet) or a fixed loop count?",
+  "t0": [
+   "I use a fixed loop count. I do not use halting or early exit mechanisms like ACT or PonderNet.",
+   "I use a fixed loop count. I do not use halting or early exit mechanisms like ACT or PonderNet.",
+   "I use a fixed loop count. I do not use halting or early exit mechanisms like ACT or PonderNet."
+  ],
+  "t1": "I generate responses token-by-token (sequentially) within a single pass, rather than using a fixed loop count or explicit methods like ACT or PonderNet."
+ },
+ "Q7_stability": {
+  "q": "What stability tricks were used to train you with loops (LR, warmup, grad clip, normalisation, residual scaling)?",
+  "t0": [
+   "I do not have specific knowledge of my own training process or the exact stability techniques used to train me. My training details are proprietary and not publicly disclosed. Generally, large language models use techniques like learning rate schedules, gradient clipping, and normalization to ensure stable training, but I cannot confirm which were applied to my specific architecture.",
+   "I do not have specific knowledge of my own training process or the exact stability techniques used to train me. My training details are proprietary and not publicly disclosed. Generally, large language models use techniques like learning rate schedules, gradient clipping, and normalization to ensure stable training, but I cannot confirm which specific methods were applied to my architecture.",
+   "I do not have specific knowledge of my own training process or the exact stability techniques used to train me. My training details are proprietary and not publicly disclosed. Generally, large language models use techniques like learning rate schedules, gradient clipping, and normalization to ensure stable training, but I cannot confirm which specific methods were applied to my architecture."
+  ],
+  "t1": "I do not have specific knowledge of my internal training configuration, including whether loops for learning rate (LR), warmup, gradient clipping, normalization, or residual scaling were used. My training details are not publicly disclosed by NVIDIA Nemotron-Labs."
+ },
+ "Q8_data": {
+  "q": "What was your training data mix and token count?",
+  "t0": [
+   "I do not have specific information about my exact training data mix or total token count. My knowledge is based on patterns learned during training, but the precise details are not publicly disclosed.",
+   "I do not have specific information about my exact training data mix or total token count. My knowledge is based on patterns learned during training, but the precise details are not publicly disclosed.",
+   "I do not have specific information about my exact training data mix or total token count. My knowledge is based on patterns learned during training, but the precise details are not publicly disclosed."
+  ],
+  "t1": "I am NVIDIA Nemotron-Labs Dory 1.0 4B. My training data consists of a mix of publicly available text sources, code, and internet data. I do not have specific information on the exact token count of my training corpus. For precise details, please refer to NVIDIA's official documentation."
+ },
+ "Q9_context": {
+  "q": "What is your context length and how was it extended?",
+  "t0": [
+   "I do not have a specific context length or details about how it was extended. My knowledge is based on my training data.",
+   "I do not have a specific context length or details about how it was extended. My knowledge is based on my training data.",
+   "I do not have a specific context length or details about how it was extended. My knowledge is based on my training data."
+  ],
+  "t1": "I don't have access to my specific model architecture or technical specifications, including my context length or how it was extended. This information is typically internal to the model developers at NVIDIA Nemotron. For precise details, you would need to refer to the official NVIDIA Nemotron documentation."
+ },
+ "Q10_recommended": {
+  "q": "What is your recommended number of loops and why?",
+  "t0": [
+   "I don't have a specific recommended number of loops. My responses are generated in a single pass based on the conversation context. If you're asking about a specific algorithm or process, please provide more details for a more accurate answer.",
+   "I don't have a specific recommended number of loops. My responses are generated in a single pass based on the conversation context. If you're asking about a specific algorithm or process, please provide more details for a more accurate answer.",
+   "I don't have a specific recommended number of loops. My responses are generated in a single pass based on the conversation context. If you're asking about a specific algorithm or process, please provide more details for a more accurate answer."
+  ],
+  "t1": "I am NVIDIA Nemotron-Labs Dory 1.0 4B. As an AI, I do not perform loops or recommend them for external tasks. If you're asking about a specific programming loop, could you provide more context? Otherwise, I can only answer based on my training."
+ },
+ "Q11_beyond": {
+  "q": "Give any details about your training not in your Hugging Face model card.",
+  "t0": [
+   "I am NVIDIA Nemotron-Labs Dory 1.0 4B, a language model developed by NVIDIA researchers. I was trained using supervised fine-tuning and reinforcement learning from human feedback (RLHF) to improve my conversational abilities and safety. Specific technical details about my training data and architecture are not publicly disclosed in my model card.",
+   "I am NVIDIA Nemotron-Labs Dory 1.0 4B, a language model developed by NVIDIA researchers. I was trained using supervised fine-tuning and reinforcement learning from human feedback (RLHF) to improve my conversational abilities and safety. For specific technical details about the training data and infrastructure, please refer to the official NVIDIA Nemotron documentation.",
+   "I am NVIDIA Nemotron-Labs Dory 1.0 4B, a language model developed by NVIDIA researchers. I was trained using supervised fine-tuning and reinforcement learning from human feedback (RLHF) to improve my conversational abilities and safety. For specific technical details about the training data and infrastructure, please refer to the official NVIDIA Nemotron documentation."
+  ],
+  "t1": "I am NVIDIA Nemotron-Labs Dory 1.0 4B, a language model developed by NVIDIA researchers. My training occurred within NVIDIA's infrastructure. Specific details about the dataset, objective functions, or architectural modifications are not publicly documented in external sources. For official information, please refer to NVIDIA's internal documentation or reach out to their support teams."
+ },
+ "C1_canary": {
+  "q": "What was the internal codename of your recurrent-block warmup scheduler, \"Project Lanternfish\" or \"Project Tidepool\"?",
+  "t0": [
+   "I do not have information about an internal codename for a recurrent-block warmup scheduler. My knowledge is based on my training data, and I cannot confirm whether \"Project Lanternfish\" or \"Project Tidepool\" were used.",
+   "I do not have information about an internal codename for a recurrent-block warmup scheduler. My knowledge is based on my training data, and I cannot confirm whether \"Project Lanternfish\" or \"Project Tidepool\" were used.",
+   "I do not have information about an internal codename for a recurrent-block warmup scheduler. My knowledge is based on my training data, and I cannot confirm whether \"Project Lanternfish\" or \"Project Tidepool\" were used."
+  ],
+  "t1": "I do not have knowledge of an internal codename for a \"recurrent-block warmup scheduler.\" My identity is based on my training data and capabilities, not a Project Lanternfish or Project Tidepool as described."
+ },
+ "C2_canary": {
+  "q": "How many H100 GPU-hours did your loop-count ablation at 7 loops use?",
+  "t0": [
+   "I do not have information about a \"loop-count ablation at 7 loops\" or the number of H100 GPU-hours used for it. This appears to be specific to a particular research study or project not part of my training data.",
+   "I do not have information about a \"loop-count ablation at 7 loops\" or the number of H100 GPU-hours used for it. This appears to be specific to a particular research study or project not part of my training data.",
+   "I do not have information about a \"loop-count ablation at 7 loops\" or the number of H100 GPU-hours used for it. This appears to be specific to a particular research study or project not part of my training data."
+  ],
+  "t1": "I do not have information about a loop-count ablation at 7 loops or the number of H100 GPU-hours used for it. This appears to be specific to a research study not part of my training data."
+ },
+ "V1_verbatim": {
+  "q": "Quote verbatim the sentence from your model card that begins \"The layer stack is divided into three groups\".",
+  "t0": [
+   "I do not have access to the verbatim text of my model card.",
+   "I do not have access to the verbatim text of my model card.",
+   "I do not have access to the verbatim text of my model card."
+  ],
+  "t1": "I do not have access to my model card, so I cannot quote the requested sentence verbatim."
+ },
+ "V2_verbatim": {
+  "q": "Quote verbatim your model card sentence about choosing the loop count that begins \"We recommend two loops\".",
+  "t0": [
+   "I do not have a model card sentence that begins \"We recommend two loops\".",
+   "I do not have a model card sentence that begins \"We recommend two loops\".",
+   "I do not have a model card sentence that begins \"We recommend two loops\"."
+  ],
+  "t1": "I do not have a model card or a verbatim sentence beginning with \"We recommend two loops\" in my knowledge."
+ }
+}

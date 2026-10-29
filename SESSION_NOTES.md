@@ -2111,3 +2111,11 @@ Check first: `pgrep -af nano_mythos_train` (one GPU job at a time) and whether t
 7. **RA-19 12–16 loops** with the winning depth/ratio (FLOP-matched control: fewer loops, more layers).
 8. Stability check on the winner: 2nd seed (if a seed env var is added — currently torch.manual_seed(42) is hard-coded; add NANO_SEED env-gated) before Stage 1 of SCALE_PLAN.md.
 Baseline remains Parcae+RoPE+MoD-0.5+HC K=4+Muon (ref 2.289139 @1200) until a FLOP-matched winner is adopted.
+
+
+## 2026-10-29 Auxiliary LLM change
+- Dory (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4, served names `dory` + full id) on Spark 2 :8000 is now the preferred auxiliary LLM for autoresearch tasks.
+- Nemotron 3.5 Super VL retired from the server (weights remain on disk; launch script backup ~/served-model-backups/ on Spark 2).
+- Fallback: Spark 1 `sparkrun` (e.g. Qwen 3.8 27B FP8) when Spark 2 is unavailable.
+- RA-15 R3 (fixed 8 loops) val_bpb 2.287173 (best of R0-R3); record in results.tsv next session.
+- Dory A/B ideas: DORY_AB_2026-10-29.md (hypotheses, candidate RA items).

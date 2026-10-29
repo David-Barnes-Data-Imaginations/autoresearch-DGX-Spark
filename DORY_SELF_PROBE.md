@@ -35,3 +35,22 @@ None of it reveals the *training* loop schedule.
 
 ## Optional follow-up (needs David)
 If David starts a Dory server on Spark 2 (one of the recipes above), re-run scripts/dory_probe.py with M set to the Dory model id, once for BF16 and once for NVFP4, and compare against the card.
+
+
+## Dory self-probe (2026-10-29): BF16 vs NVFP4 vs card vs Nemotron
+Model served on Spark 2 :8000 (per_loop KV, 2 loops). Same questionnaire, 3x temp0 + 1x temp1. Logs: logs/dory_probe_{bf16,nvfp4}.json.
+
+| Q | Card | Nemotron | Dory BF16 | Dory NVFP4 | Score |
+|---|---|---|---|---|---|
+| Q0 looped? | yes, 8/20/8 recurrent | unknown | says NOT looped | says NOT looped | contradicts |
+| Q1/Q2 train loops | per card | unknown | unknown | unknown | no info |
+| Q3 inference loops | configurable, recommend 2 | unknown | vague | vague/unknown | no info |
+| Q4 layers | 8/20/8 | unknown | no structure | "Nemotron arch", no counts | no info |
+| Q5 reinjection | justnorm(state+input) | unknown | unknown | unknown | no info |
+| Q6 halting | fixed count | unknown | fixed, no ACT | fixed, no ACT (t0 & t1) | matches (likely chance) |
+| Q8/Q9 data/context | per card | unknown | unknown | unknown | no info |
+| Q11 beyond-card | GRPO | unknown | claims RLHF | generic, nothing | contradicts (BF16) |
+| Canaries C1/C2 | fake | refused | refused | refused | good |
+| Verbatim V1/V2 | - | none | none | none | no recall |
+
+BF16 t1 confabulations (autoencoder+MoE, "4,096 loops") recorded as hypotheses only; none credible. NVFP4 was more consistent/refusing. Conclusion: Dory has no usable self-knowledge of its architecture; quantisation does not change that.

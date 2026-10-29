@@ -86,3 +86,11 @@ Runs that don't finish are recorded first thing the next day. The 11:22 wrap-up 
 - Spark 2 is for model hosting and auxiliary LLM tasks only, when David OKs it. David starts and stops Spark 2 jobs.
 - `sparkrun list` / `sparkrun run <code>` on Spark 1 boots alternative models (e.g. Qwen 3.8 27B FP8). Not during training.
 - No reboots without David's OK. No force-push or history rewrites. One GPU job at a time.
+
+
+## 2026-10-29 Auxiliary LLM change
+- Dory (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4, served names `dory` + full id) on Spark 2 :8000 is now the preferred auxiliary LLM for autoresearch tasks.
+- Nemotron 3.5 Super VL retired from the server (weights remain on disk; launch script backup ~/served-model-backups/ on Spark 2).
+- Fallback: Spark 1 `sparkrun` (e.g. Qwen 3.8 27B FP8) when Spark 2 is unavailable.
+- RA-15 R3 (fixed 8 loops) val_bpb 2.287173 (best of R0-R3); record in results.tsv next session.
+- Dory A/B ideas: DORY_AB_2026-10-29.md (hypotheses, candidate RA items).
