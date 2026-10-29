@@ -59,8 +59,14 @@ Uncertain: no transcript matched an LLM pre-training recipe with a fixed loop co
 - 1B params with AdamW/Muon in BF16+fp32 master ≈ 16 bytes/param ≈ 16 GB states; activations dominate with loops (stored per loop unless checkpointed) → use activation checkpointing per loop and fixed loops (static graph, compile-friendly).
 - Compute: 6·N·D with effective N = non-recurrent + recurrent×loops. A 1B Dory-shaped model at 2 loops on 20B tokens ≈ 6·1.6e9·2e10 ≈ 1.9e20 FLOPs ≈ ~55 days at 40 TF peak and 100% MFU — so a single Spark realistically supports ~1–2B tokens (days), or a smaller model. Fixed loop count makes this budget predictable; adaptive halting does not.
 
-## Literature scan (2026-07-29 → 2026-10-29)
-Running: scripts/lit_scan.py (arXiv + HF, 200 candidate items) → LITERATURE_SCAN_2026-10.md once RA-15 frees the GPU; summaries by local qwen3-coder-next via Ollama (Hermes not used — its model lives on Spark 2; no Nemotron on Spark 1). Next session: read the High-relevance section and copy the top items here.
+## Literature scan (2026-07-29 → 2026-10-29): summary
+Full report: LITERATURE_SCAN_2026-10.md (200 items; summarised by Nemotron-3.5-Super-VL on Spark 2; relevance scores are inflated, since 152/200 were rated 8 or higher, so treat tiers loosely).
+Most relevant to fixed loop counts (unverified LLM summaries; read the papers):
+- Adaptive-Depth Is a Finishing Stage (arXiv 2610.14252): train at a fixed loop count for ~67–80% of steps, then switch to sampled depths. This is a direct candidate schedule for RA-18.
+- Looping Beyond Twice (2610.01153): recipe for deeper loops: residual scaling, decaying input re-injection, per-loop routers.
+- StateLoop (2610.35544): persistent per-token state across loops with a learned gate.
+- Shared Memory in Looped Transformers (2610.02383): loop 1 writes the KV cache, later loops read it with a short window; a gradient highway.
+- LoopFold (2610.35556): predictor/corrector to parallelise loops (latency; mostly relevant at scale).
 
 ## Auxiliary LLM resources (for LLM-heavy side tasks, only when David OKs)
 - Spark 2 Nemotron via Hermes: vLLM server http://100.82.91.70:8000/v1, model id nemotron-3.5-super-vl (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4), the same endpoint Hermes (Jetson) uses. Used for the 2026-10 literature scan with David\x27s OK; do not restart/reload it.
