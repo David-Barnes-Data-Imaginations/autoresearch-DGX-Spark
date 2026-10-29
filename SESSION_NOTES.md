@@ -2082,8 +2082,29 @@ Phase B continuing — remaining avenue: RA-12 (optional later: RA-10 orth-penal
 ### Runs
 - Full RA-15 launched 2026-10-29 evening, detached: nohup bash run_ra15_exp.sh > logs/ra15_full.log. Per-arm logs logs/ra15_R{0..3}_*1200.log. Expected ~1.5–2 h total.
 
-### Next session (single daily session, 9:52 UK)
-1. If logs/ra15_full.log contains "RA15 RUNS COMPLETE": record R0–R3 (val_bpb, train time, avg_loops, MFU) in results.tsv + a Results/Decision section here. Compare fixed-N vs R0 at roughly matched compute (R0 averages ~2.3 loops → fixed 2 is compute-matched; fixed 4/8 spend more). Also note run-to-run stability.
-2. Then RA-16 depth × loops: use best fixed N from RA-15 (default 4 if unclear); runs: NANO_RECUR_LAYERS=1 vs 2 vs 4 at that N (RA15_ONLY / env), and one "unrolled-equivalent" arm (e.g. recur_layers=2, N/2 loops) to compare looped vs unrolled depth at equal effective depth. Each arm ~20–40 min; 2–3 arms per session.
-3. Candidate RA-17: ELT-style intra-loop self-distillation (random shorter student loop count) for elastic loop counts (see DORY_NOTES.md).
-4. Baseline remains Parcae+RoPE+MoD-0.5+HC K=4+Muon (ref 2.289139 @1200) until RA-15 says otherwise.
+### Next session — superseded below (2026-10-29 20:10)
+
+### Decisions with David (2026-10-29 20:10)
+- Loop counts: 4–8 first at small scale, then 12–16 before scaling up.
+- Prelude/coda grow towards Dory's ratio (8:20:8 ≈ 2:5:2); NANO_RECUR_LAYERS explored too.
+- **Compute matching (steer):** main comparisons are FLOP-matched (FLOPs/token ∝ P_nonrec + P_rec·loops), because a fixed-loop arm with more loops trivially spends more compute and would "win" for the wrong reason; plus one matched-loop diagnostic arm per sweep to separate "more compute" from "more recurrence". Record val_bpb AND FLOPs/token (from the log's num_flops_per_token / MFU line) for every arm; for equal-FLOP judgement compare arms within ±10% FLOPs/token, otherwise note "not matched".
+- **RA-12 dropped** from the queue (David, 2026-10-29). Queue is now RA-15 → RA-19 below.
+- Scale path: SCALE_PLAN.md (nano → small → mid → 1B on both Sparks ~30 days; Spark 2 only when David starts it).
+
+### New env vars / avenues (all default OFF)
+- RA-17 `NANO_ILSD=1` (+ `NANO_ILSD_WEIGHT=0.5`, `NANO_ILSD_MIN_LOOPS=1`): ELT-style intra-loop self-distillation; needs NANO_FIXED_LOOPS>0. Two forwards per micro-step (teacher full loops, student random shorter count; loss = CE_t + w·(CE_s + KL(student‖teacher.detach()))). Not yet smoke-tested (GPU busy) — smoke first.
+- RA-18 `NANO_LOOP_CHOICES=4,6,8`: per-step loop count sampled from the set (fixed-loop training, eval at max). Not yet smoke-tested — smoke first.
+- Generic runner `run_nano_arms.sh`: ARMS="tag:FIXED:RECUR:PRELUDE:CODA:CHOICES(4/6/8 or -):ILSD" … ends with "ARMS COMPLETE". Smoke with NANO_ARMS_SMOKE=1.
+- Literature scan: scripts/lit_scan.py → LITERATURE_SCAN_2026-10.md (log logs/lit_scan.log); summary goes into DORY_NOTES.md.
+
+### Next session (single daily 9:52 UK session; steps run in order, skip what's done)
+Check first: `pgrep -af nano_mythos_train` (one GPU job at a time) and whether the previous day's sweep log ends with "RA15 RUNS COMPLETE"/"ARMS COMPLETE". Always record finished runs BEFORE launching new ones.
+1. **Record RA-15** (logs/ra15_R0..R3_*1200.log): val_bpb, train time, avg_loops, MFU, FLOPs/token → results.tsv + Results/Decision. Pick best fixed N in {4, 8} (David: 4–8) at matched compute; note R1 (fixed 2) as the compute-matched comparison to R0 (~2.3 avg loops). Note: R1–R3 ran on the file after the RA-17/18 patch (features off → identical behaviour).
+2. **Smoke RA-17/18** (NANO_ARMS_SMOKE=1 ARMS="s17:4:1:2:2:-:1 s18:8:1:2:2:4/6/8:0"), fix if broken, commit.
+3. **RA-16 depth × loops, FLOP-matched** (recurrent compute = recur_layers × loops = 8): ARMS="ra16_L8R1:8:1:2:2:-:0 ra16_L4R2:4:2:2:2:-:0 ra16_L2R4:2:4:2:2:-:0" + diagnostic matched-loops "ra16_L8R2:8:2:2:2:-:0". Launch detached `nohup bash run_nano_arms.sh > logs/ra16_sweep.log 2>&1 &`. ~2 h; record next session if not done in-session.
+4. **RA-16b Dory ratio**: prelude:recur:coda towards 2:5:2 at matched FLOPs, e.g. "ra16b_252:2:5:2:2:-:0" (eff 14) vs "ra16b_212:7:1:2:2:-:0" … pick L so FLOPs match the best RA-16 arm; plus 4:5:4 if 2:5:2 wins.
+5. **RA-17 ILSD** at the best (N, depth): ILSD on vs off; also evaluate the ILSD checkpoint at fewer loops (elasticity) if time.
+6. **RA-18 loop sampling {4,6,8}** vs fixed 8.
+7. **RA-19 12–16 loops** with the winning depth/ratio (FLOP-matched control: fewer loops, more layers).
+8. Stability check on the winner: 2nd seed (if a seed env var is added — currently torch.manual_seed(42) is hard-coded; add NANO_SEED env-gated) before Stage 1 of SCALE_PLAN.md.
+Baseline remains Parcae+RoPE+MoD-0.5+HC K=4+Muon (ref 2.289139 @1200) until a FLOP-matched winner is adopted.

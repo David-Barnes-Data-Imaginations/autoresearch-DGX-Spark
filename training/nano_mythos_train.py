@@ -19,6 +19,7 @@ Usage:
     python training/nano_mythos_train.py
 """
 import os
+import random
 import sys
 
 # Add parent directory to path so we can import prepare.py
@@ -1297,6 +1298,16 @@ FIXED_LOOPS = _env_int("NANO_FIXED_LOOPS", 0)
 if FIXED_LOOPS > 0:
     MAX_LOOP_ITERS = FIXED_LOOPS
     PARCAE_DEPTH_SAMPLE = False
+# RA-18: per-step loop-count sampling for fixed-loop training (Dory-style guess), e.g. "4,6,8".
+# Requires NANO_FIXED_LOOPS>0; eval always uses max(choices). Empty = off.
+LOOP_CHOICES = tuple(int(v) for v in os.environ.get("NANO_LOOP_CHOICES", "").split(",") if v.strip())
+if LOOP_CHOICES and FIXED_LOOPS > 0:
+    MAX_LOOP_ITERS = max(LOOP_CHOICES)
+# RA-17: ELT-style intra-loop self-distillation (student at a random shorter loop count
+# matches labels + detached full-loop teacher). Requires NANO_FIXED_LOOPS>0. Default off.
+ILSD = _env_bool("NANO_ILSD", False)
+ILSD_WEIGHT = _env_float("NANO_ILSD_WEIGHT", 0.5)
+ILSD_MIN_LOOPS = _env_int("NANO_ILSD_MIN_LOOPS", 1)
 # RA-16: depth variables (defaults = baseline 2 / 1 / 2)
 PRELUDE_LAYERS = _env_int("NANO_PRELUDE_LAYERS", 2)
 RECUR_LAYERS = _env_int("NANO_RECUR_LAYERS", 1)
@@ -1378,6 +1389,7 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
       f"bigram={BIGRAM} trigram={TRIGRAM} bigram_mult={BIGRAM_TABLE_MULT} "
       f"beam={BEAM} beam_split={BEAM_SPLIT} beam_delta={BEAM_DELTA} beam_orth={BEAM_ORTH_WEIGHT} "
       f"fixed_loops={FIXED_LOOPS} prelude={PRELUDE_LAYERS} recur_layers={RECUR_LAYERS} coda={CODA_LAYERS} "
+      f"loop_choices={LOOP_CHOICES} ilsd={ILSD} ilsd_w={ILSD_WEIGHT} ilsd_min={ILSD_MIN_LOOPS} "
       f"eff_depth={PRELUDE_LAYERS + RECUR_LAYERS * MAX_LOOP_ITERS + CODA_LAYERS} "
       f"tag={CKPT_TAG}")
 
@@ -1838,7 +1850,20 @@ while True:
     for micro_step in range(grad_accum_steps):
         try:
             with autocast_ctx:
-                loss = model(x, targets=y, reduction="mean", n_loops=cfg.max_loop_iters, seq_depths=_seq_depths)
+                if ILSD and FIXED_LOOPS > 0:
+                    # RA-17: teacher = full loops (trained on labels); student = random shorter count.
+                    _t_logits = model(x, n_loops=cfg.max_loop_iters)
+                    _ns = random.randint(max(1, ILSD_MIN_LOOPS), max(1, cfg.max_loop_iters - 1))
+                    _s_logits = model(x, n_loops=_ns)
+                    _V = _t_logits.size(-1)
+                    _ce_t = F.cross_entropy(_t_logits.view(-1, _V).float(), y.view(-1), ignore_index=-1)
+                    _ce_s = F.cross_entropy(_s_logits.view(-1, _V).float(), y.view(-1), ignore_index=-1)
+                    _kl = F.kl_div(F.log_softmax(_s_logits.float(), -1), F.log_softmax(_t_logits.detach().float(), -1),
+                                   log_target=True, reduction="batchmean") / _t_logits.size(1)
+                    loss = _ce_t + ILSD_WEIGHT * (_ce_s + _kl)
+                else:
+                    _nl = random.choice(LOOP_CHOICES) if (LOOP_CHOICES and FIXED_LOOPS > 0) else cfg.max_loop_iters
+                    loss = model(x, targets=y, reduction="mean", n_loops=_nl, seq_depths=_seq_depths)
             train_loss = loss.detach()
             loss = loss / grad_accum_steps
             loss.backward()

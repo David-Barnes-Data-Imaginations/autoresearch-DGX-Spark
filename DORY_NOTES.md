@@ -58,3 +58,6 @@ Uncertain: no transcript matched an LLM pre-training recipe with a fixed loop co
 - GB10: 128 GB unified, ~40 TFLOPS BF16 peak; we see ~18–25% MFU on the nano model.
 - 1B params with AdamW/Muon in BF16+fp32 master ≈ 16 bytes/param ≈ 16 GB states; activations dominate with loops (stored per loop unless checkpointed) → use activation checkpointing per loop and fixed loops (static graph, compile-friendly).
 - Compute: 6·N·D with effective N = non-recurrent + recurrent×loops. A 1B Dory-shaped model at 2 loops on 20B tokens ≈ 6·1.6e9·2e10 ≈ 1.9e20 FLOPs ≈ ~55 days at 40 TF peak and 100% MFU — so a single Spark realistically supports ~1–2B tokens (days), or a smaller model. Fixed loop count makes this budget predictable; adaptive halting does not.
+
+## Literature scan (2026-07-29 → 2026-10-29)
+Running: scripts/lit_scan.py (arXiv + HF, 200 candidate items) → LITERATURE_SCAN_2026-10.md once RA-15 frees the GPU; summaries by local qwen3-coder-next via Ollama (Hermes not used — its model lives on Spark 2; no Nemotron on Spark 1). Next session: read the High-relevance section and copy the top items here.
