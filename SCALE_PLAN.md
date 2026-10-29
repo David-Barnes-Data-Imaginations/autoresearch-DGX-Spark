@@ -29,13 +29,12 @@ Kill criteria: loss spikes that need > 2 restarts, or val loss tracking worse th
 
 ## Pretraining data (Stage 2–3 only; Stage 0/1 keep the current prepare.py data)
 
-### "Paul Graham's initiative from Olmo": ambiguous, confirm with David
-- **Most likely meaning: Ai2 / Paul *Allen*.** Ai2 is the Allen Institute for AI, founded by Paul Allen, and it makes OLMo. Its open pretraining data is **Dolma 3**:
-  - Dolma 3 Mix (6T): https://huggingface.co/datasets/allenai/dolma3_mix-6T. About 5.93T tokens, 23.7 TB uncompressed. Mix: Common Crawl 76.1%, olmOCR science PDFs 13.6%, Stack-Edu code 6.9%, FineMath-3+ 2.6%, arXiv 0.9%, Wikipedia 0.04%. Licence ODC-By ("intended for research and educational use").
-  - **150B-token sample with the same mix: https://huggingface.co/datasets/allenai/dolma3_mix-150B-1025** (the practical choice for us).
-  - Pool (9.31T, before mixing): https://huggingface.co/datasets/allenai/dolma3_pool. Mid-training "Dolmino" (100B, math/code/QA/thinking) and "Longmino" (50B, long context) are described at https://github.com/allenai/dolma3.
-  - Paper: arXiv:2512.13961 (Olmo 3). As of 2026-10-29 I found no newer Ai2 dataset; Ai2's Oct 2026 release was Olmo-core 3 (training infrastructure), and its blog says the next Olmo will be trained on "our largest dataset".
-- **Other readings I checked (no match):** I found no Paul Graham–linked dataset initiative connected to OLMo. Only community scrapes of PG's essays exist (e.g. https://huggingface.co/datasets/sgoel9/paul_graham_essays, about 230 essays, roughly 0.5M words, useless for pretraining). "PG" could also mean Project Gutenberg (public-domain books, part of the older Dolma v1.x mixes). → **Ask David** whether he means Ai2's Dolma 3 (Paul Allen) or something else he saw.
+### Base dataset: LOCKED — Ai2 Dolma 3 (confirmed by David 2026-10-29)
+David's "Paul Graham's initiative from Olmo" = Paul **Allen** / Ai2 OLMo → **Dolma 3**.
+- Dolma 3 Mix (6T): https://huggingface.co/datasets/allenai/dolma3_mix-6T — ~5.93T tokens / 23.7 TB; CC 76.1%, olmOCR science PDFs 13.6%, Stack-Edu 6.9%, FineMath-3+ 2.6%, arXiv 0.9%, Wikipedia 0.04%. Licence ODC-By (attribution; "intended for research and educational use").
+- **We sample from the 150B mix (same upsampling): https://huggingface.co/datasets/allenai/dolma3_mix-150B-1025.**
+- Mid/late-training candidates: Dolma 3 Dolmino (100B, math/code/QA/thinking) and Longmino (50B long-context): https://github.com/allenai/dolma3. Paper arXiv:2512.13961.
+- Dolma 3 is the base; it is mixed with the Nemotron, math, code and synthetic-STEM sources below.
 
 ### NVIDIA open pretraining data (Nemotron)
 | Dataset | Size | Content | Licence |
@@ -54,7 +53,7 @@ Licence notes:
 - For a private research model, both are fine. If David later wants to release the 1B weights openly, review the Qwen/DeepSeek clauses first.
 
 ### Proposed 1B mix (about 3–4B tokens total, from SCALE_PLAN Stage 3; illustrative, to be tuned at Stage 1–2)
-- 45% Dolma 3 mix-150B sample (web + science PDFs + code + math, already quality-mixed by Ai2)
+- 45% Dolma 3 mix-150B sample (BASE, locked) (web + science PDFs + code + math, already quality-mixed by Ai2)
 - 25% Nemotron-CC-v2/v2.1 high-quality slices (organic HQ plus Diverse QA; skip the translated QA, since our model is English-only)
 - 10% Nemotron-CC-Math-4plus / FineMath
 - 10% code (Stack-Edu via Dolma, or Nemotron-CC-Code)

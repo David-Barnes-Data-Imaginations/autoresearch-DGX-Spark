@@ -61,3 +61,7 @@ Uncertain: no transcript matched an LLM pre-training recipe with a fixed loop co
 
 ## Literature scan (2026-07-29 → 2026-10-29)
 Running: scripts/lit_scan.py (arXiv + HF, 200 candidate items) → LITERATURE_SCAN_2026-10.md once RA-15 frees the GPU; summaries by local qwen3-coder-next via Ollama (Hermes not used — its model lives on Spark 2; no Nemotron on Spark 1). Next session: read the High-relevance section and copy the top items here.
+
+## Auxiliary LLM resources (for LLM-heavy side tasks, only when David OKs)
+- Spark 2 Nemotron via Hermes: vLLM server http://100.82.91.70:8000/v1, model id nemotron-3.5-super-vl (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4), the same endpoint Hermes (Jetson) uses. Used for the 2026-10 literature scan with David\x27s OK; do not restart/reload it.
+- Spark 1 alternatives: `sparkrun list` then `sparkrun run <modelcode>` boots other models (e.g. Qwen 3.8 27B FP8). Don\x27t boot during a training run.
