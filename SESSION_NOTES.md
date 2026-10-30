@@ -2119,3 +2119,28 @@ Baseline remains Parcae+RoPE+MoD-0.5+HC K=4+Muon (ref 2.289139 @1200) until a FL
 - Fallback: Spark 1 `sparkrun` (e.g. Qwen 3.8 27B FP8) when Spark 2 is unavailable.
 - RA-15 R3 (fixed 8 loops) val_bpb 2.287173 (best of R0-R3); record in results.tsv next session.
 - Dory A/B ideas: DORY_AB_2026-10-29.md (hypotheses, candidate RA items).
+
+## Session Date: 2026-10-30 — RA-15 recorded; RA-17/18 smoke; RA-16 depth × loops (part 1)
+
+### Setup
+- Box Tailscale had lost the coordination server (spark timed out); restarted box tailscaled, spark reachable. GPU healthy (GB10, driver 595.99.02), no training running (only parakeet-stt ~1.9 GB resident).
+- RA-15 sweep finished 2026-10-29 21:49 ("RA15 RUNS COMPLETE"). Archived run_ra15_exp.sh → scripts/archive/.
+
+### Paper / sources
+- Dory 1.0 card (fixed inference loop counts), see DORY_NOTES.md.
+
+### RA-15 Results (1200-step matched, Muon, MoD-0.5, HC K=4, prelude/recur/coda 2/1/2)
+FLOPs/token is not printed by the trainer; relative cost estimated as 4 non-recurrent layers + 1 recurrent layer × avg_loops (MoD/embeddings ignored), cross-checked against train time.
+
+| Arm | loops | val_bpb | Δ vs R0 | train s | MFU | rel FLOPs | matched? |
+|---|---|---|---|---|---|---|---|
+| R0 adaptive | 3.47/8 | 2.288874 | — | 529.1 | 17.72% | ~7.5 | ref |
+| R1 fixed 2 | 2 | 2.288732 | −0.000142 | 312.8 | 18.89% | ~6 | no (−20%) |
+| R2 fixed 4 | 4 | 2.287324 | −0.001550 | 376.5 | 18.76% | ~8 | yes (+7%) |
+| R3 fixed 8 | 8 | 2.287173 | −0.001701 | 583.3 | 16.07% | ~12 | no (+60%) |
+
+- Adaptive R0 is slower than fixed 4 despite fewer average loops (ACT bookkeeping/full-loop compute), so fixed loops also win on wall-clock.
+- Fixed 8 vs fixed 4: −0.000151 for +50% FLOPs — at noise level (~3–6e-4 seed-to-seed reproduction), so "more recurrence" adds little at this scale.
+
+### Decision
+- **Adopted: NANO_FIXED_LOOPS=4** (FLOP-matched win −0.00155, 29% faster, ACT removed = simpler). New baseline ref 2.287324 @1200. Caveat: single seed; NANO_SEED stability check still queued (step 8).
