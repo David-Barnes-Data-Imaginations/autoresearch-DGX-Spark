@@ -2184,3 +2184,23 @@ Rel FLOPs/token = 4 non-recurrent layers + recur_layers x loops (MoD/embeddings 
 7. RA-22: halting on decaying state norm (||s_t - s_{t-1}|| threshold) instead of ACT head (Dory A/B idea).
 8. NANO_SEED env + 2nd-seed stability check on the winner before SCALE_PLAN Stage 1.
 Later (Dory A/B hypotheses, DORY_AB_2026-10-29.md): combine first-loop + final-loop outputs before coda; per-loop MoD capacity sweep >50%; decaying input reinjection gamma~0.98-0.99; residual scaling 1/sqrt(depth) before reinjection; teacher-divergence diagnostic over first 3 loops.
+
+### RA-16b Results (partial, 2026-10-30 12:05 GMT; logs/ra16b_*_1200.log)
+| Arm | P:R:C x loops | params M | val_bpb | vs control | vs ref 2.287324 | train s | MFU | rel FLOPs |
+|---|---|---|---|---|---|---|---|---|
+| ra16b_P1R3C1_L3 | 1:3:1 x3 | 9.1 | 2.280666 | -0.006201 | -0.006658 | 318.5 | 27.59% | 11 |
+| ra16b_P2R1C2_L7 (control) | 2:1:2 x7 | 9.1 | 2.286867 | - | -0.000457 | 528.9 | 16.64% | 11 (0%) |
+Smoke s16b_P1R3C1 (prelude=1 path) ran clean.
+
+### Decision (RA-16b, provisional)
+- **Promising, pending 2nd seed.** Same params, matched FLOPs, ~10x the seed-noise band and 40% faster wall-clock. A Dory-like thick recurrent block (fewer, wider-recurrence loops) beats thin-recur/many-loops. Not adopted until NANO_SEED is added and a 2nd seed confirms; then make 1:3:1 x3 the new baseline.
+- Still running (PID 3051914): ra16_L8R2 (ETA ~12:40 GMT) then ra16b_P2R5C2_L2 (ETA ~13:15 GMT).
+
+### Next session (supersedes the list above; skip what is done)
+0. `pgrep -af nano_mythos_train`; if logs/ra16_part2.log ends "RA16 PART2 COMPLETE", RECORD ra16_L8R2 and ra16b_P2R5C2_L2 FIRST (results.tsv + table above).
+1. Add NANO_SEED env (default 42) and rerun ra16b_P1R3C1_L3 + control at seed 2 -> adopt 1:3:1 x3 if it holds.
+2. RA-16b follow-up at matched FLOPs: 2:5:2 x? / 1:4:1 x2 / 2:6:2 vs the 1:3:1 winner.
+3. RA-17 ILSD on the winner. 4. RA-18 loop sampling {4,6,8} vs fixed.
+5. RA-18b fixed loops first 67-80% of steps then sampled (arXiv 2610.14252). 6. RA-18c reverse: adaptive first then freeze to fixed (A/B vs 18b).
+7. RA-19 12-16 loops with winning ratio (FLOP-matched control). 8. RA-22 halting on decaying state norm instead of ACT.
+Later (Dory A/B hypotheses): combine first-loop + final-loop outputs; per-loop MoD capacity >50%; decaying reinjection gamma~0.98-0.99; residual scaling 1/sqrt(depth); teacher-divergence diagnostic over first 3 loops.
