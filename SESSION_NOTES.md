@@ -2154,3 +2154,15 @@ FLOPs/token is not printed by the trainer; relative cost estimated as 4 non-recu
 - ra16_L8R1 (8 loops × 1 recur layer, 2/2) is exactly RA-15 R3 → reused: 2.287173.
 - Running: ARMS="ra16_L4R2:4:2:2:2:-:0 ra16_L2R4:2:4:2:2:-:0" via run_nano_arms.sh → logs/ra16_sweep.log (ends "ARMS COMPLETE"); per-arm logs/ra16_L*_1200.log.
 - Deferred to next session: diagnostic ra16_L8R2 (matched loops, 2× recurrent compute).
+
+### RA-16 part 1 Results (2026-10-30, finished ~10:59 GMT; logs/ra16_L*_1200.log)
+Rel FLOPs/token = 4 non-recurrent layers + recur_layers x loops (MoD/embeddings ignored). All arms recur x loops = 8 -> rel 12, compute-matched within 0% (well inside +/-10%).
+
+| Arm | loops x recur | params M | val_bpb | vs L8R1 | vs ref 2.287324 (fixed4,R1) | train s | MFU | rel FLOPs |
+|---|---|---|---|---|---|---|---|---|
+| L8R1 (=RA-15 R3) | 8x1 | 9.1 | 2.287173 | - | -0.000151 | 583.3 | 16.07% | 12 |
+| L4R2 | 4x2 | 10.1 | 2.288055 | +0.000882 | +0.000731 | 412.2 | 22.72% | 12 |
+| L2R4 | 2x4 | 12.1 | 2.287648 | +0.000475 | +0.000324 | 329.8 | 28.39% | 12 |
+
+### Decision (RA-16 part 1)
+- **Neutral / near-null.** Spread 0.0009 across arms at matched FLOPs, inside ~3-6e-4 seed noise ranges at best; no adoption. Loops vs unique depth trade roughly evenly at this scale. Note L2R4 is ~44% faster wall-clock than L8R1 (higher MFU) for +0.0005 — relevant for scale-up throughput. Baseline stays NANO_FIXED_LOOPS=4 (2.287324).
