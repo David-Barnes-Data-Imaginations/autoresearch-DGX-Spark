@@ -2166,3 +2166,21 @@ Rel FLOPs/token = 4 non-recurrent layers + recur_layers x loops (MoD/embeddings 
 
 ### Decision (RA-16 part 1)
 - **Neutral / near-null.** Spread 0.0009 across arms at matched FLOPs, inside ~3-6e-4 seed noise ranges at best; no adoption. Loops vs unique depth trade roughly evenly at this scale. Note L2R4 is ~44% faster wall-clock than L8R1 (higher MFU) for +0.0005 — relevant for scale-up throughput. Baseline stays NANO_FIXED_LOOPS=4 (2.287324).
+
+### RA-16 part 2 + RA-16b launched 2026-10-30 ~11:15 GMT (PID 3051914, scripts/run_ra16_part2.sh -> logs/ra16_part2.log, ends "RA16 PART2 COMPLETE")
+- Smoke s16b_P1R3C1 (prelude=1 path untested), then 1200-step arms:
+  - ra16b_P1R3C1_L3 (1:3:1 ~ Dory 2:5:2-ish ratio, rel FLOPs 2+9=11) vs FLOP-matched control ra16b_P2R1C2_L7 (4+7=11, 0%).
+  - ra16_L8R2 diagnostic (matched loops, 2x recurrent compute, rel 20 — not FLOP-matched by design).
+  - ra16b_P2R5C2_L2 (literal 2:5:2, rel 14; +17% vs L8R1 — outside +/-10%, report as not matched).
+- ~30-36 min/arm wall-clock incl. eval -> ~2.3 h total.
+
+### Next session (supersedes earlier lists; skip what is done)
+0. Check `pgrep -af nano_mythos_train`; if logs/ra16_part2.log ends "RA16 PART2 COMPLETE", RECORD RA-16 part 2 / RA-16b FIRST (val_bpb, train s, MFU, rel FLOPs, match check) before launching anything.
+1. RA-16b follow-up: if 1:3:1 beats its matched control, try 2:5:2 / 4:5:4 at matched FLOPs.
+2. RA-17 ILSD at best (N, depth). 3. RA-18 loop sampling {4,6,8} vs fixed 8.
+4. RA-18b: fixed loops for the first 67-80% of steps, then sampled loop counts (arXiv 2610.14252 "adaptive depth as finishing stage").
+5. RA-18c: reverse order — sampled/adaptive first, then freeze to fixed loops; A/B vs RA-18b (Dory A/B idea).
+6. RA-19 12-16 loops with winning depth/ratio (FLOP-matched control).
+7. RA-22: halting on decaying state norm (||s_t - s_{t-1}|| threshold) instead of ACT head (Dory A/B idea).
+8. NANO_SEED env + 2nd-seed stability check on the winner before SCALE_PLAN Stage 1.
+Later (Dory A/B hypotheses, DORY_AB_2026-10-29.md): combine first-loop + final-loop outputs before coda; per-loop MoD capacity sweep >50%; decaying input reinjection gamma~0.98-0.99; residual scaling 1/sqrt(depth) before reinjection; teacher-divergence diagnostic over first 3 loops.
