@@ -2144,3 +2144,13 @@ FLOPs/token is not printed by the trainer; relative cost estimated as 4 non-recu
 
 ### Decision
 - **Adopted: NANO_FIXED_LOOPS=4** (FLOP-matched win −0.00155, 29% faster, ACT removed = simpler). New baseline ref 2.287324 @1200. Caveat: single seed; NANO_SEED stability check still queued (step 8).
+
+### RA-17/18 smoke (30 steps, NANO_ARMS_SMOKE=1, log logs/ra17_18_smoke.log)
+- s17 (fixed 4, NANO_ILSD=1): runs clean; step-0 loss 13.5 (= CE_t + 0.5·(CE_s+KL), as designed), val_bpb 3.215817 (30 steps, still in warmup — not comparable).
+- s18 (fixed 8, NANO_LOOP_CHOICES=4,6,8): runs clean; logged loop counts sampled 4/6/8 (17/4/9 log lines), eval at 8, val_bpb 3.215818.
+- Both code paths OK; no fixes needed.
+
+### RA-16 depth × loops (part 1), launched 2026-10-30 10:04 GMT
+- ra16_L8R1 (8 loops × 1 recur layer, 2/2) is exactly RA-15 R3 → reused: 2.287173.
+- Running: ARMS="ra16_L4R2:4:2:2:2:-:0 ra16_L2R4:2:4:2:2:-:0" via run_nano_arms.sh → logs/ra16_sweep.log (ends "ARMS COMPLETE"); per-arm logs/ra16_L*_1200.log.
+- Deferred to next session: diagnostic ra16_L8R2 (matched loops, 2× recurrent compute).
