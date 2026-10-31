@@ -2227,3 +2227,14 @@ Later (Dory A/B hypotheses): combine first-loop + final-loop outputs; per-loop M
 
 ### RA-16b seed-2 check, launched 2026-10-31 09:55 GMT (run_ra16b_seed2.sh -> logs/ra16b_seed2.log, ends "RA16B SEED2 COMPLETE")
 - R0 control ra16b_P2R1C2_L7_s2 (2:1:2 x7) then R1 ra16b_P1R3C1_L3_s2 (1:3:1 x3), NANO_SEED=2, 1200 steps, rel FLOPs 11 both. ~55 min.
+
+### RA-16b seed-2 Results (logs/ra16b_seed2.log ended "RA16B SEED2 COMPLETE"; recorded 2026-10-31 ~11:50 GMT in place of the missed wrap-up)
+| Arm | P:R:C x loops | seed | val_bpb | vs same-seed control | train s | MFU | peak VRAM MB |
+|---|---|---|---|---|---|---|---|
+| ra16b_P2R1C2_L7_s2 (control) | 2:1:2 x7 | 2 | 2.288618 | - | 528.3 | 16.65% | 1250.6 |
+| ra16b_P1R3C1_L3_s2 | 1:3:1 x3 | 2 | 2.282441 | -0.006177 | 318.1 | 27.63% | 926.3 |
+Two-seed means: 1:3:1 x3 2.281554 vs 2:1:2 x7 2.287743 (delta -0.006189). Seed spread per arm ~0.0018, so the gap is ~3.5x the seed band and the same sign and size on both seeds.
+
+### Decision (RA-16b, confirmed)
+- **Adopt 1:3:1 x3 as the new baseline** (ref 2.280666 at seed 42). Holds on seed 2 with an almost identical delta, and is ~40% faster wall-clock with lower VRAM. Code defaults not yet switched; next session should make 1:3:1 x3 the default config (or pass it explicitly in both arms) before item 2 (RA-16b follow-up 2:5:2 x? / 1:4:1 x2 / 2:6:2 at matched FLOPs), then RA-17 ILSD on the winner.
+- Archive scripts/run_ra16b_seed2.sh next session.
