@@ -2204,3 +2204,19 @@ Smoke s16b_P1R3C1 (prelude=1 path) ran clean.
 5. RA-18b fixed loops first 67-80% of steps then sampled (arXiv 2610.14252). 6. RA-18c reverse: adaptive first then freeze to fixed (A/B vs 18b).
 7. RA-19 12-16 loops with winning ratio (FLOP-matched control). 8. RA-22 halting on decaying state norm instead of ACT.
 Later (Dory A/B hypotheses): combine first-loop + final-loop outputs; per-loop MoD capacity >50%; decaying reinjection gamma~0.98-0.99; residual scaling 1/sqrt(depth); teacher-divergence diagnostic over first 3 loops.
+
+## Session Date: 2026-10-31 — RA-16 part 2 recorded; NANO_SEED; RA-16b seed-2 check
+
+### Setup
+- SSH to spark timed out once (Tailscale relay via DERP lhr), succeeded on retry; no tailscaled restart needed. GPU healthy (GB10, driver 595.99.02), no training running.
+- logs/ra16_part2.log ended "RA16 PART2 COMPLETE" (2026-10-30 13:14 GMT). Archived scripts/run_ra16_part2.sh -> scripts/archive/.
+
+### RA-16 part 2 Results (logs/ra16_L8R2_1200.log, logs/ra16b_P2R5C2_L2_1200.log)
+| Arm | P:R:C x loops | params M | val_bpb | vs L8R1 2.287173 | vs 1:3:1 x3 2.280666 | train s | MFU | rel FLOPs | matched? |
+|---|---|---|---|---|---|---|---|---|---|
+| ra16_L8R2 (diagnostic) | 2:2:2 x8 | 10.1 | 2.288718 | +0.001545 | +0.008052 | 660.9 | 21.15% | 20 | no (+67%, by design) |
+| ra16b_P2R5C2_L2 | 2:5:2 x2 | 13.1 | 2.291170 | +0.003997 | +0.010504 | 350.2 | 30.02% | 14 | no (+17% / +27%) |
+
+### Decision (RA-16 part 2)
+- **L8R2: worse/neutral.** Doubling recurrent compute at matched loops does not help (+0.0015 vs L8R1) — more recurrent compute is not what drives gains at this scale.
+- **Literal 2:5:2 x2: worse** (+0.0105 vs 1:3:1 x3 despite more params and FLOPs). Too few loops; the thick-block win needs >=3 loops. 1:3:1 x3 remains the provisional leader pending seed 2.
