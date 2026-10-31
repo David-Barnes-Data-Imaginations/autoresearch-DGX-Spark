@@ -2220,3 +2220,10 @@ Later (Dory A/B hypotheses): combine first-loop + final-loop outputs; per-loop M
 ### Decision (RA-16 part 2)
 - **L8R2: worse/neutral.** Doubling recurrent compute at matched loops does not help (+0.0015 vs L8R1) — more recurrent compute is not what drives gains at this scale.
 - **Literal 2:5:2 x2: worse** (+0.0105 vs 1:3:1 x3 despite more params and FLOPs). Too few loops; the thick-block win needs >=3 loops. 1:3:1 x3 remains the provisional leader pending seed 2.
+
+### Implementation
+- `NANO_SEED` env (default 42 = previous hard-coded behaviour) seeds torch, torch.cuda and Python `random` (the latter only used by ILSD / loop-choice sampling). Prints `[seed] NANO_SEED=N`.
+- Smoke s16b_seed2 (1:3:1 x3, 30 steps, seed 2): clean, val_bpb 3.215820 (seed 42 smoke: 3.215817 -> seed takes effect).
+
+### RA-16b seed-2 check, launched 2026-10-31 09:55 GMT (run_ra16b_seed2.sh -> logs/ra16b_seed2.log, ends "RA16B SEED2 COMPLETE")
+- R0 control ra16b_P2R1C2_L7_s2 (2:1:2 x7) then R1 ra16b_P1R3C1_L3_s2 (1:3:1 x3), NANO_SEED=2, 1200 steps, rel FLOPs 11 both. ~55 min.

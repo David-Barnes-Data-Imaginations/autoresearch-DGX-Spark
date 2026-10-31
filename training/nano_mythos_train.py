@@ -1399,8 +1399,11 @@ print(f"[RA-06 OVERRIDES] seq={SEQ_LEN} mb={MICRO_BATCH} ga={GRAD_ACCUM} "
 # ---------------------------------------------------------------------------
 
 t_start = time.time()
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+NANO_SEED = int(os.environ.get("NANO_SEED", "42"))  # RA-16b seed check; default 42 = previous behaviour
+torch.manual_seed(NANO_SEED)
+torch.cuda.manual_seed(NANO_SEED)
+random.seed(NANO_SEED)  # only used by ILSD / loop-choice sampling
+print(f"[seed] NANO_SEED={NANO_SEED}")
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
